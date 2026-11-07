@@ -1,0 +1,20 @@
+[Unit]
+Description=Hermes Fleet daemon (multi-repo Hermes/CrewAI harness, 01:00-08:00)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/ubuntu/hermes-fleet
+Environment=PATH=/root/.local/bin:/usr/local/bin:/usr/bin:/bin
+# --forever: 시간대 밖에서는 종료하지 않고 대기한다 (systemd 가 재시작을 반복하지 않도록)
+ExecStart=/root/.local/bin/uv run hermes-fleet daemon --forever
+Nice=10
+IOSchedulingClass=idle
+Restart=always
+RestartSec=60
+StandardOutput=append:/home/ubuntu/hermes-fleet/logs/daemon.log
+StandardError=append:/home/ubuntu/hermes-fleet/logs/daemon.log
+
+[Install]
+WantedBy=multi-user.target

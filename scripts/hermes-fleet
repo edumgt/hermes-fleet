@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# 어디서든 `scripts/hermes-fleet <command>` 로 CLI 실행 (uv 가상환경 자동 사용).
+set -euo pipefail
+FLEET_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+export PATH="/root/.local/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
+exec uv run --project "$FLEET_DIR" --directory "$FLEET_DIR" hermes-fleet "$@"
