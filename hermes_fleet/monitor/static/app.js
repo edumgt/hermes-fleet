@@ -338,7 +338,7 @@
     try {
       const r = await api("/api/schedule", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
       $("#sched-msg").textContent = r.changed ? "저장됨 — 데몬은 다음 tick 에 반영" : "변경 없음";
-      toast("스케줄을 저장했습니다", true);
+      toast("스케줄을 저장했습니다 — 새 시간대 안이면 10분 안에 데몬이 시작되고, 밖이면 종료됩니다", true);
       document.activeElement.blur();
       refresh();
     } catch (e) { toast(`저장 실패: ${e.message}`); }

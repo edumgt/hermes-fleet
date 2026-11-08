@@ -25,7 +25,7 @@ hermes-fleet/
 ├── scripts/hermes-fleet          # CLI 래퍼 (uv)
 ├── scripts/monitor.sh            # 웹 모니터 up/down/logs/status/local/demo
 ├── scripts/demo_fleet.py         # 미리보기용 가짜 fleet 생성
-├── scripts/install-cron.sh       # 01:00~07:59 10분마다 기동 시도(flock) — WSL 기본
+├── scripts/install-cron.sh       # 10분마다 기동 시도(flock); 시간대는 fleet.yaml active_hours 로 데몬이 판정 — WSL 기본
 ├── scripts/install-systemd.sh    # systemd 가 켜진 환경용(선택)
 ├── state/   (gitignore)  # fleet.json(커서), <repo>.json(처리 기록·머지 기록), PAUSE, paused/<repo>, requests/, daemon.lock
 ├── logs/    (gitignore)  # daemon.log
@@ -47,11 +47,11 @@ hermes-fleet/
 
 | 시각 | 동작 |
 |---|---|
-| 01:00~ | cron 이 10분마다 기동 시도 → 이미 돌고 있으면 flock 으로 무시. PC가 03:00에 켜지면 03:10 안에 시작 |
+| 01:00~ | cron 은 하루 종일 10분마다 기동 시도(시간대 밖이면 데몬이 조용히 종료) → 시간대 시작 후 10분 안에 시작, 이미 돌고 있으면 flock 으로 무시. PC가 03:00에 켜지면 03:10 안에 시작 |
 | 01:00~07:15 | 커서 다음 레포부터 `todo` 티켓이 있는 레포를 찾아 `hermes/<ID>` 브랜치에서 PM→Design→Dev⇄QA 실행, **브랜치에 커밋**(push 없음). QA PASS → `review`, FAIL/오류 → `blocked`. todo 가 모두 비면 Tech Lead 가 레포 하나를 분석해 `proposed` 티켓을 커밋 |
 | 07:15~ | 새 작업 시작 안 함(`no_new_work_minutes_before_end: 45`). 진행 중 티켓은 마침 |
 | 07:30 | 레포마다 하루 한 번 **자동 머지**: `git pull --rebase` → `review` 브랜치 `--no-ff` 머지 → 레포 프로필 테스트·빌드 실행 → 통과 시 티켓 `done`, `origin` push, 브랜치 삭제. 충돌/검증 실패는 되돌리고 `review` 로 남김 |
-| 08:00 | 시간대 종료 → 데몬 종료. cron 은 08시대부터 기동하지 않음 |
+| 08:00 | 시간대 종료 → 데몬 종료. 이후 cron 이 깨워도 시간대 밖이라 즉시 종료(로그 없음) |
 | 언제나 | 웹/CLI 요청(`state/requests/`)은 데몬이 매 tick 가장 먼저 처리. 시간대 밖에는 2분 간격 `daemon --on-demand` 러너(같은 flock)가 요청만 처리하고 종료 |
 
 사람이 하는 일은 webrtc-app 과 같습니다: 제안 승인(`approve`), 자동 머지 전 리뷰(막으려면 티켓을 `blocked` 로), blocked 티켓 처리.
@@ -66,7 +66,7 @@ uv sync --extra dev
 uv run pytest                      # 자체 테스트
 scripts/hermes-fleet check         # 엔드포인트·모델(hermes3:8b, qwen2.5-coder:7b)·설정·대상 레포 점검
 scripts/hermes-fleet repos -v      # 대상 레포와 검증 명령
-scripts/install-cron.sh            # 새벽 자동 실행 + 2분 간격 on-demand 러너(웹/CLI 요청 처리) 등록 (해제: --remove)
+scripts/install-cron.sh            # 10분 간격 데몬 기동 시도(시간대는 fleet.yaml active_hours) + 2분 간격 on-demand 러너(웹/CLI 요청 처리) 등록 (해제: --remove)
 ```
 
 ## 명령
@@ -116,7 +116,7 @@ scripts/monitor.sh local     # Docker 없이: uv sync --extra monitor 후 uv 가
 
 | 조작 | 하는 일 | 반영 |
 |---|---|---|
-| 스케줄 저장 | 작동 시간대·자동 머지 시각·종료 전 여유(분)·폴링 주기를 `fleet.yaml` 에 저장 | 데몬이 돌고 있으면 다음 tick 에 다시 읽음 |
+| 스케줄 저장 | 작동 시간대·자동 머지 시각·종료 전 여유(분)·폴링 주기를 `fleet.yaml` 에 저장 | 데몬이 돌고 있으면 다음 tick 에 다시 읽음. cron 은 시간을 고정하지 않으므로 새 시간대 안이면 10분 안에 데몬이 시작되고, 밖이면 종료 |
 | 전체 일시정지/재개 | `state/PAUSE` 생성/삭제 | 데몬이 새 작업·요청을 시작하지 않음(진행 중 티켓은 마침) |
 | 레포 ▶ 실행 / 🔍 발굴 / ⇅ 머지 | `state/requests/` 에 요청 파일을 쌓음 | 야간 데몬은 매 tick 요청을 먼저 처리하고, 시간대 밖에는 cron 의 2분 간격 `daemon --on-demand` 러너가 처리 |
 | 레포 ⏹ 중지 / ▶ 재개 | `stop` 요청 + `state/paused/<repo>` 마커 | 진행 중 크루는 다음 단계 경계에서 중단(티켓 blocked, 부분 작업 커밋), 레포는 재개 전까지 건너뜀 |

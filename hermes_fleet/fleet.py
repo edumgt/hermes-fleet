@@ -123,6 +123,8 @@ class FleetDaemon:
     def run(self) -> int:
         if self.options.on_demand:
             return self._run_on_demand()
+        if self._idle_outside_window():
+            return 0  # cron 모드: 시간대 밖이고 할 일(요청)도 없으면 로그 없이 종료 — cron 이 하루 종일 10분마다 깨우므로 조용해야 한다
         self.log(f"[fleet] start root={self.cfg.root} hours={self.cfg.active_hours} merge_at={self.cfg.merge_at} model={self.settings.litellm_model} @ {self.settings.base_url}")
         while True:
             try:
@@ -143,6 +145,18 @@ class FleetDaemon:
                 return 0
             if outcome == "wait":
                 self.sleep(self.cfg.poll_seconds)
+
+    def _idle_outside_window(self) -> bool:
+        """cron 모드(exit_outside_window)에서 지금 시작할 이유가 없는가: 시간대(fleet.yaml active_hours) 밖이고 대기 요청도 없음.
+
+        cron 줄은 시간을 고정하지 않고(`*/10 * * * *`) 하루 종일 깨우며, 시간대 판정은 전부 fleet.yaml 의 active_hours 로 한다.
+        그래서 웹 모니터에서 스케줄을 바꾸면 cron 을 다시 등록하지 않아도 다음 10분 틱부터 그대로 적용된다."""
+        if not self.options.exit_outside_window:
+            return False
+        self._refresh_config()
+        if rq.next_pending(self.state_dir) is not None:
+            return False
+        return not is_active(self.now().time(), self.window)
 
     def _run_on_demand(self) -> int:
         """웹/CLI 요청만 처리하고 종료. 요청이 없으면 아무 로그도 남기지 않는다(2분마다 돌아도 조용하도록)."""
@@ -168,6 +182,8 @@ class FleetDaemon:
         if self.pause_file.exists():
             if self.options.on_demand:
                 return "stop"
+            if self.options.exit_outside_window and not is_active(self.now().time(), self.window):
+                return "stop"  # 일시정지 + 시간대 밖: 살아서 폴링할 이유가 없다
             self.log(f"[fleet] paused ({self.pause_file}); run `hermes-fleet resume`")
             return "wait"
         now = self.now()

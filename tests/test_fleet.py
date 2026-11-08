@@ -102,3 +102,30 @@ def test_scaffold_is_idempotent(node_python_repo: Path):
     created = f.ensure_scaffold(p)
     assert {c.name for c in created} == {".gitignore", "README.md", ".gitkeep"}
     assert f.ensure_scaffold(p) == []
+
+
+def test_run_outside_window_exits_silently_unless_requests(tmp_path: Path, node_python_repo: Path, monkeypatch):
+    """cron 이 하루 종일 깨우므로 시간대 밖이면 로그 한 줄 없이 종료해야 한다. 단 대기 요청이 있으면 처리한다."""
+    p = detect_profile(node_python_repo)
+    dm, logs = make_daemon(tmp_path, [p], dt.datetime(2026, 11, 8, 13, 0), monkeypatch)
+    assert dm.run() == 0 and logs == []
+
+    dm, logs = make_daemon(tmp_path, [p], dt.datetime(2026, 11, 8, 13, 0), monkeypatch)
+    pending = [{"id": "r1", "repo": p.name, "action": "run"}]
+    monkeypatch.setattr(f.rq, "next_pending", lambda d: pending[0] if pending else None)
+    handled = []
+    monkeypatch.setattr(dm, "_handle_request", lambda r: (handled.append(r["id"]), pending.clear()))
+    dm.options.once = False
+    assert dm.run() == 0 and handled == ["r1"] and any("outside active hours" in m for m in logs)
+
+    # 일시정지 + 시간대 밖(cron 모드) → 폴링하지 않고 종료
+    dm, logs = make_daemon(tmp_path, [p], dt.datetime(2026, 11, 8, 13, 0), monkeypatch)
+    dm.pause_file.parent.mkdir(parents=True, exist_ok=True)
+    dm.pause_file.write_text("")
+    assert dm.tick() == "stop"
+
+    # 웹에서 시간대를 지금 시각으로 바꾸면(fleet.yaml hot-reload 와 같은 효과) 같은 cron 틱에서 시작한다
+    dm, logs = make_daemon(tmp_path, [p], dt.datetime(2026, 11, 8, 13, 0), monkeypatch)
+    dm.cfg.active_hours = "12:00-18:00"
+    dm.window = f.parse_window(dm.cfg.active_hours)
+    assert dm._idle_outside_window() is False
