@@ -14,7 +14,6 @@ endpoint_retry_seconds: 60
 # include 가 비어 있지 않으면 그 목록 안에서만 고른다. exclude 는 항상 제외.
 include: []
 exclude:
-  - hermes-fleet
   - docker-class
   - rfp-crawler
   - msa-k8s-lab      # 서비스 여러 개(MSA 실습), 원격 없음, 소유자 불일치(dubious ownership) → 수동 포함 전까지 제외
@@ -24,6 +23,18 @@ repos:
   webrtc-app:
     frontend: frontend
     backend: signaling
+  # 하네스 자신도 크루의 대상. FE = 웹 모니터 정적 SPA, BE = 파이썬 패키지(루트). 검증 = uv run pytest.
+  # deny: 크루가 데몬 상태·로그·fleet 설정·잠금을 건드리지 못하게 (fs 도구 샌드박스에 추가되는 금지 경로)
+  hermes-fleet:
+    frontend: hermes_fleet/monitor/static
+    backend: .
+    deny: [state/, logs/, fleet.yaml, .env.example, uv.lock, docker-compose.yml, systemd/]
+  # 배포 선언(워크플로 보드에 표시, trigger: fleet 이면 push 뒤 command 를 fleet 이 실행 / manual 이면 웹의 '배포' 요청으로만 실행)
+  edumgt-site:
+    deploy:
+      target: aws-s3-cloudfront
+      trigger: manual
+      note: "S3 버킷 www.edumgt.co.kr + CloudFront EWR0TS02XHGPK, CI 없음 — 수동 배포"
 
 discover:
   max_proposals: 2        # 레포당 한 번 발굴에 제안할 최대 티켓 수

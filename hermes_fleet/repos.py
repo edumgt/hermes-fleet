@@ -57,6 +57,8 @@ class RepoProfile:
     base_branch: str = "main"
     has_remote: bool = False
     reasons: list[str] = field(default_factory=list)   # 선정/제외 사유
+    deny: tuple[str, ...] = ()                         # 에이전트 도구가 건드리면 안 되는 레포 내 경로 (fleet.yaml repos.<name>.deny)
+    deploy: dict[str, Any] = field(default_factory=dict)   # fleet.yaml repos.<name>.deploy: {target, trigger: actions|fleet|manual|none, command, cwd, note}
 
     @property
     def eligible(self) -> bool:
@@ -222,6 +224,8 @@ def detect_profile(repo_root: Path, override: dict[str, Any] | None = None) -> R
         return profile
     profile.base_branch = str(override.get("base_branch") or git.default_branch(repo_root))
     profile.has_remote = git.has_remote(repo_root)
+    profile.deny = tuple(str(d) for d in (override.get("deny") or []))
+    profile.deploy = dict(override.get("deploy") or {})
     dirs = _candidate_dirs(repo_root)
 
     # frontend
@@ -285,20 +289,27 @@ class FleetConfig:
         cfg.auto_merge = {**cfg.auto_merge, **(data.get("auto_merge") or {})}
         return cfg
 
-    def refresh_selection(self) -> bool:
-        """fleet.yaml 이 바뀌었으면 include/exclude/repos 만 다시 읽는다(데몬이 돌고 있는 동안 레포 선택 변경 반영). 바뀌었으면 True."""
+    RELOADABLE = ("include", "exclude", "repos", "active_hours", "merge_at", "no_new_work_minutes_before_end", "poll_seconds", "endpoint_retry_seconds", "discover", "auto_merge")
+
+    def refresh(self) -> list[str]:
+        """fleet.yaml 이 바뀌었으면 다시 읽어 바뀐 키 목록을 돌려준다(데몬이 돌고 있는 동안 웹/CLI 의 설정 변경을 반영). root 는 바꾸지 않는다."""
         if self.source is None:
-            return False
+            return []
         try:
             mtime = self.source.stat().st_mtime
             if mtime == self.source_mtime:
-                return False
+                return []
             fresh = FleetConfig.load(self.source)
         except (OSError, ValueError, yaml.YAMLError):
-            return False
-        self.include, self.exclude, self.repos = fresh.include, fresh.exclude, fresh.repos
+            return []
+        changed = [k for k in self.RELOADABLE if getattr(self, k) != getattr(fresh, k)]
+        for k in changed:
+            setattr(self, k, getattr(fresh, k))
         self.source_mtime = mtime
-        return True
+        return changed
+
+    def refresh_selection(self) -> bool:   # 하위 호환
+        return bool(self.refresh())
 
 
 def scan_repos(cfg: FleetConfig) -> list[RepoProfile]:

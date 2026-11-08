@@ -146,3 +146,80 @@ def set_repo_selected(path: Path, name: str, selected: bool) -> dict[str, Any]:
             fh.write(new_text)
     data = yaml.safe_load(new_text) or {}
     return {"name": name, "selected": selected, "changed": changed, "include": data.get("include") or [], "exclude": data.get("exclude") or []}
+
+
+# ---------- 최상위 스칼라 키 (스케줄 등) ----------
+
+_SCALAR_LINE = re.compile(r"^([A-Za-z_][\w-]*):([ \t]*)([^#\n]*?)([ \t]*#.*)?$")
+SCHEDULE_KEYS = ("active_hours", "merge_at", "no_new_work_minutes_before_end", "poll_seconds", "endpoint_retry_seconds")
+
+
+def _yaml_scalar(value: Any) -> str:
+    if value is None or value == "":
+        return '""'
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, float)):
+        return str(value)
+    text = str(value)
+    return '"' + text.replace('"', '\\"') + '"' if (":" in text or text[:1] in "'\"[{#&*!|>%@`" or text.strip() != text) else text
+
+
+def set_scalar(text: str, key: str, value: Any) -> str:
+    """최상위 `key: value` 줄의 값만 바꾼다(끝 주석 보존). 없으면 끝에 추가."""
+    lines = text.splitlines()
+    rendered = _yaml_scalar(value)
+    for i, line in enumerate(lines):
+        m = _SCALAR_LINE.match(line)
+        if m and m.group(1) == key:
+            lines[i] = f"{key}:{m.group(2) or ' '}{rendered}{m.group(4) or ''}"
+            return "\n".join(lines) + ("\n" if text.endswith("\n") else "")
+    return text.rstrip("\n") + f"\n{key}: {rendered}\n"
+
+
+def update_schedule(path: Path, **fields: Any) -> dict[str, Any]:
+    """active_hours / merge_at / no_new_work_minutes_before_end / poll_seconds / endpoint_retry_seconds 를 검증 후 제자리 저장."""
+    from .schedule import parse_clock, parse_window  # noqa: WPS433
+
+    unknown = [k for k in fields if k not in SCHEDULE_KEYS]
+    if unknown:
+        raise FleetFileError(f"지원하지 않는 설정 키: {unknown}")
+    clean: dict[str, Any] = {}
+    for key, value in fields.items():
+        if key == "active_hours":
+            value = (value or "").strip()
+            parse_window(value or None)                      # 형식 검증 (빈 값 = 항상)
+            clean[key] = value
+        elif key == "merge_at":
+            value = (value or "").strip()
+            if value:
+                t = parse_clock(value)
+                if t is None:
+                    raise FleetFileError("merge_at 형식은 HH:MM")
+                value = f"{t.hour:02d}:{t.minute:02d}"
+            clean[key] = value
+        else:
+            try:
+                n = int(value)
+            except (TypeError, ValueError) as exc:
+                raise FleetFileError(f"{key} 는 정수여야 합니다") from exc
+            lo = 0 if key == "no_new_work_minutes_before_end" else 10
+            if n < lo or n > 86400:
+                raise FleetFileError(f"{key} 범위 벗어남 ({lo}~86400)")
+            clean[key] = n
+    text = path.read_text(encoding="utf-8")
+    new_text = text
+    for key, value in clean.items():
+        new_text = set_scalar(new_text, key, value)
+    try:
+        data = yaml.safe_load(new_text) or {}
+    except yaml.YAMLError as exc:
+        raise FleetFileError(f"편집 결과가 유효한 YAML 이 아닙니다: {exc}") from exc
+    for key, value in clean.items():
+        got = data.get(key)
+        if (got or "") != (value or "") and got != value:
+            raise FleetFileError(f"{key} 저장 결과가 일치하지 않습니다: {got!r} != {value!r}")
+    if new_text != text:
+        with path.open("w", encoding="utf-8") as fh:
+            fh.write(new_text)
+    return {"changed": new_text != text, **{k: data.get(k) for k in SCHEDULE_KEYS}}

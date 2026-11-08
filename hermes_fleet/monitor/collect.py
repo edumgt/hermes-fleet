@@ -18,7 +18,8 @@ from pathlib import Path
 from typing import Any, Callable
 
 from ..backlog import VALID_STATUS, Ticket, TicketError, load_tickets
-from ..fleetfile import FleetFileError, is_selected, set_repo_selected
+from .. import requests as rq
+from ..fleetfile import SCHEDULE_KEYS, FleetFileError, is_selected, set_repo_selected, update_schedule
 from ..llm import check_endpoint
 from ..merge import list_ticket_branches, ticket_on_branch
 from ..org import load_org_for, load_template
@@ -26,15 +27,19 @@ from ..repos import FleetConfig, RepoProfile, detect_profile
 from ..schedule import can_start_work, is_active, minutes_until_end, parse_clock, parse_window
 from ..settings import FLEET_DIR, REPO_WORKSPACE_DIR, Settings, load_dotenv
 from ..tools import git
+from ..workflow import detect_delivery, github_runs, sync_status
 
 LOG_TS = re.compile(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}) (.*)$")
 LOG_REPO = re.compile(r"\[(?:fleet|merge)\]\[([^\]]+)\]|^\[([^\]]+)\]\[(?:pm|design|dev|qa)\]")
 LOG_TICKET_START = re.compile(r"\[fleet\]\[([^\]]+)\] ▶ ([A-Za-z]+-\d+) (.*?) \[(P\d)\]$")
 LOG_STAGE = re.compile(r"^\[([^\]]+)\]\[(pm|design|dev|qa)\] iteration (\d+) → (.*)$")
+DEPLOYISH = re.compile(r"deploy|\bcd\b|release|publish|rollout", re.I)
 MERGE_SECTION = re.compile(r"^## (\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\s*$")
 MERGE_OUTCOME = re.compile(r"^- (merged|conflict|verify-failed|skipped|error)\s+(\S+) \(([^)]+)\)\s*(.*)$")
 START_MARK = "[fleet] start "
 STOP_MARKS = ("[fleet] outside active hours; exiting", "[fleet] interrupted", "tickets, stopping")
+OD_START = "[fleet] on-demand start"
+OD_STOP = "[fleet] on-demand done"
 ARTIFACT_SUFFIXES = {".md", ".jsonl", ".txt", ".json", ".log"}
 STAGES = ("pm", "design", "dev", "qa")
 TAIL_BYTES = 2 * 1024 * 1024
@@ -244,6 +249,7 @@ class Collector:
         self.now = now
         self.llm_cache_seconds = llm_cache_seconds
         self._llm_cache: tuple[float, dict[str, Any]] | None = None
+        self._delivery_cache: dict[str, tuple[float, dict[str, Any]]] = {}
         self.started_at = time.time()
 
     @classmethod
@@ -285,6 +291,7 @@ class Collector:
         lines, _ = tail_lines(log, 400)
         mtime = log.stat().st_mtime if log.exists() else None
         last_start = last_stop = -1
+        od_start = od_stop = -1
         start_ts = None
         for i, line in enumerate(lines):
             if START_MARK in line:
@@ -293,6 +300,10 @@ class Collector:
                 start_ts = m.group(1) if m else None
             if any(m in line for m in STOP_MARKS):
                 last_stop = i
+            if OD_START in line:
+                od_start = i
+            if OD_STOP in line:
+                od_stop = i
         lock_held = probe_lock(self.paths.lock_file)
         poll = int(cfg.poll_seconds)
         stale_after = max(3 * poll, 2700)
@@ -300,10 +311,13 @@ class Collector:
         fresh = age is not None and age <= stale_after
         paused = self.paths.pause_file.exists()
 
+        on_demand_running = od_start > od_stop and od_start > last_start and fresh
         if lock_held is True:
             status, method = "running", "flock"
         elif last_start > last_stop and fresh:
             status, method = "running", "log"
+        elif on_demand_running:
+            status, method = "running", "on-demand"
         elif last_start > last_stop:
             status, method = "stale", "log"
         else:
@@ -319,6 +333,7 @@ class Collector:
             "stale_after_seconds": stale_after, "started_at": start_ts.replace(" ", "T") if start_ts else None,
             "expected_running": in_window and not paused,
             "activity": activity,
+            "paused_repos": rq.paused_repos(self.paths.state_dir),
         }
 
     def _current_activity(self, lines: list[str], running: bool) -> dict[str, Any] | None:
@@ -418,8 +433,10 @@ class Collector:
             reasons.insert(0, "exclude 목록")
         elif not s.in_include:
             reasons.insert(0, "include 목록에 없음")
+        pending = [r["action"] + (f" {r['ticket']}" if r.get("ticket") else "") for r in rq.list_pending(self.paths.state_dir) if r.get("repo") == p.name]
         base: dict[str, Any] = {"name": p.name, "root": str(p.root), "eligible": s.target, "fe_be_ok": p.eligible, "selected": s.selected,
                                 "excluded": s.excluded, "in_include": s.in_include, "reasons": reasons,
+                                "paused": rq.is_repo_paused(self.paths.state_dir, p.name), "pending_requests": pending, "deny": list(p.deny),
                                 "frontend": p.frontend.label() if p.frontend else None, "backend": p.backend.label() if p.backend else None,
                                 "base_branch": p.base_branch, "has_remote": p.has_remote}
         if not p.eligible:
@@ -463,6 +480,12 @@ class Collector:
             base["discover_runs"] = sorted((f.name for f in disc.glob("*.md")), reverse=True)[:20] if disc.is_dir() else []
             base["log_lines"] = self.log_tail(200, repo=p.name)["lines"]
             base["daily"] = self._daily_for([base])
+            d = self.delivery(p)
+            ci = self.ci_runs(d, p.base_branch)
+            base["delivery"] = d
+            base["ci"] = ci
+            base["last_deploy"] = state.get("last_deploy")
+            base["workflow"] = self.workflow_stages(base, d, ci, self.daemon(self.config(), self.now()).get("activity"))
         return base
 
     def _org_source(self, p: RepoProfile) -> str | None:
@@ -494,6 +517,176 @@ class Collector:
         result = set_repo_selected(self.paths.config, name, selected)
         cfg = self.config()
         result["now_selected"] = is_selected(name, cfg.include, cfg.exclude)
+        return result
+
+    # ----- 전달 체인 / 워크플로 -----
+    def delivery(self, p: RepoProfile, ttl: float = 60.0) -> dict[str, Any]:
+        key = str(p.root)
+        hit = self._delivery_cache.get(key)
+        if hit and time.time() - hit[0] < ttl:
+            return hit[1]
+        d = detect_delivery(p.root, p.base_branch, p.deploy).to_dict()
+        d["sync"] = sync_status(p.root, p.base_branch) if d["remote_url"] else {"tracked": False}
+        self._delivery_cache[key] = (time.time(), d)
+        return d
+
+    @staticmethod
+    def _github_token() -> str | None:
+        return os.environ.get("MONITOR_GITHUB_TOKEN") or os.environ.get("GITHUB_TOKEN") or None
+
+    def ci_runs(self, d: dict[str, Any], base_branch: str) -> dict[str, Any] | None:
+        if d.get("remote_host") != "github" or not d.get("owner"):
+            return None
+        return github_runs(d["owner"], d["repo"], base_branch, self._github_token())
+
+    def workflow_stages(self, r: dict[str, Any], d: dict[str, Any], ci: dict[str, Any] | None, activity: dict[str, Any] | None) -> list[dict[str, Any]]:
+        """레포 하나의 전개 단계: 발굴 → 승인 → 크루 → 리뷰 → 머지 → push → CI/CD → 배포."""
+        target = bool(r.get("eligible"))
+        counts = r.get("counts") or {}
+        state = self._repo_state(r["name"])
+        verdicts = r.get("verdicts") or {}
+        runs_all = parse_merge_report(self._read_text(Path(r["root"]) / REPO_WORKSPACE_DIR / "merge-report.md", 60_000))
+        last_push = next((x["at"] for x in runs_all if x.get("pushed")), None)
+        lm = r.get("last_merge") or {}
+        disc_dir = Path(r["root"]) / REPO_WORKSPACE_DIR / "discover"
+        disc_files = sorted(disc_dir.glob("*.md")) if disc_dir.is_dir() else []
+        last_disc = disc_files[-1].stem if disc_files else None
+        if last_disc and len(last_disc) == 15:
+            last_disc = f"{last_disc[:4]}-{last_disc[4:6]}-{last_disc[6:8]}T{last_disc[9:11]}:{last_disc[11:13]}:{last_disc[13:15]}"
+        mine = activity if activity and activity.get("repo") == r["name"] else None
+        off = "none" if not target else None
+        stages = [
+            {"key": "discover", "label": "발굴", "mode": off or "auto", "count": counts.get("proposed", 0), "at": last_disc,
+             "status": "ok" if counts.get("proposed") else "idle", "detail": f"승인 대기 {counts.get('proposed', 0)}" if target else "대상 아님"},
+            {"key": "approve", "label": "승인", "mode": off or "manual", "count": counts.get("todo", 0), "status": "ok" if counts.get("todo") else "idle",
+             "detail": f"todo {counts.get('todo', 0)} (사람/웹 승인)"},
+            {"key": "crew", "label": "크루 작업", "mode": off or "auto", "count": counts.get("in-progress", 0) + (1 if mine and mine.get("kind") == "ticket" else 0),
+             "status": "running" if mine else ("ok" if r.get("processed_count") else "idle"), "at": (r.get("last_ticket") or {}).get("finished_at"),
+             "detail": (f"진행 중 {mine.get('id')} {('· ' + mine['stage']['name']) if mine.get('stage') else ''}" if mine else f"처리 {r.get('processed_count', 0)} · PASS {verdicts.get('PASS', 0)} / FAIL {verdicts.get('FAIL', 0)} / ERR {verdicts.get('ERROR', 0)}")},
+            {"key": "review", "label": "리뷰 / QA", "mode": off or "manual", "count": counts.get("review", 0), "fail": counts.get("blocked", 0),
+             "status": "fail" if counts.get("blocked") else ("ok" if counts.get("review") else "idle"), "detail": f"리뷰 대기 {counts.get('review', 0)} · 막힘 {counts.get('blocked', 0)}"},
+            {"key": "merge", "label": "머지 · 검증", "mode": off or ("auto" if r.get("has_verification") else "manual"), "count": counts.get("done", 0), "at": (lm.get("at") or "").replace(" ", "T") or None,
+             "status": "fail" if lm.get("issues") else ("ok" if lm.get("merged") else ("warn" if target and not r.get("has_verification") else "idle")),
+             "detail": (f"마지막 {len(lm.get('merged') or [])}건" + (f" · 문제 {', '.join(lm['issues'])}" if lm.get("issues") else "")) if lm else ("검증 명령 없음 → 자동 머지 제외" if target and not r.get("has_verification") else f"{r.get('verify_steps') and len(r['verify_steps']) or 0}단계 검증 후 머지")},
+            {"key": "push", "label": "GitHub push", "mode": d.get("push_mode", "none"), "at": (last_push or "").replace(" ", "T") or None,
+             "status": "ok" if last_push else ("warn" if d.get("sync", {}).get("ahead") else "idle"),
+             "detail": (d.get("remote_web") or d.get("remote_url") or "원격 없음") + (f" · ahead {d['sync']['ahead']} / behind {d['sync']['behind']}" if d.get("sync", {}).get("tracked") else ""),
+             "link": d.get("remote_web")},
+        ]
+        wf_names = [w["name"] for w in d.get("workflows", []) if w.get("on_base_push")]
+        ci_status, ci_detail, ci_at, ci_link = "idle", (", ".join(wf_names) if wf_names else "push 에 반응하는 워크플로 없음"), None, (ci or {}).get("web")
+        if ci and ci.get("ok") and ci.get("runs"):
+            runs = ci["runs"]
+            if any(x.get("status") in ("in_progress", "queued") for x in runs):
+                ci_status = "running"
+            elif any(x.get("conclusion") not in ("success", "skipped", None) for x in runs):
+                ci_status = "fail"
+            else:
+                ci_status = "ok"
+            ci_detail = " · ".join(f"{x['name']}: {x.get('conclusion') or x.get('status')}" for x in runs[:4])
+            ci_at = max((x.get("updated_at") or "" for x in runs), default=None) or None
+            ci_link = runs[0].get("url") or ci_link
+        elif ci and not ci.get("ok"):
+            ci_detail += f" · Actions 조회 실패: {ci.get('error')}"
+        stages.append({"key": "cicd", "label": "CI/CD (Actions)", "mode": d.get("cicd_mode", "none"), "status": ci_status, "detail": ci_detail, "at": ci_at, "link": ci_link,
+                       "workflows": [w["name"] for w in d.get("workflows", [])]})
+        ld = state.get("last_deploy")
+        dep_runs = [x for x in (ci or {}).get("runs", []) if DEPLOYISH.search(x.get("name") or "")]
+        if ld:
+            dep_status, dep_detail, dep_at = ("ok" if ld.get("ok") else "fail"), f"fleet 배포 {'성공' if ld.get('ok') else '실패'} ({ld.get('source')})", (ld.get("at") or "").replace(" ", "T")
+        elif dep_runs:
+            x = dep_runs[0]
+            dep_status = "running" if x.get("status") in ("in_progress", "queued") else ("ok" if x.get("conclusion") == "success" else "fail")
+            dep_detail, dep_at = f"{x['name']}: {x.get('conclusion') or x.get('status')} @{x.get('sha')}", x.get("updated_at")
+        else:
+            dep_status, dep_detail, dep_at = "idle", {"actions": "push 시 Actions 가 배포", "fleet": "push 뒤 fleet 이 deploy.command 실행", "manual": "사람이 실행(웹 '배포' 요청 가능)" if (d.get("override") or {}).get("command") else "사람이 실행 (스크립트/IaC 탐지)", "none": "배포 없음"}.get(d.get("deploy_mode"), ""), None
+        stages.append({"key": "deploy", "label": "배포" + (" (AWS)" if d.get("aws") else ""), "mode": d.get("deploy_mode", "none"), "status": dep_status, "detail": dep_detail, "at": dep_at,
+                       "target": d.get("deploy_target"), "aws": d.get("aws"), "link": dep_runs[0].get("url") if dep_runs else None,
+                       "can_request": bool((d.get("override") or {}).get("command")) and target})
+        return stages
+
+    def workflow_board(self, with_ci: bool = False) -> dict[str, Any]:
+        cfg = self.config()
+        now = self.now()
+        activity = self.daemon(cfg, now).get("activity")
+        rows = []
+        scanned = self.scan(cfg)
+        summaries = {s.profile.name: self._repo_summary(s) for s in scanned}
+        deliveries = {s.profile.name: self.delivery(s.profile) for s in scanned}
+        ci_map: dict[str, Any] = {}
+        if with_ci:
+            from concurrent.futures import ThreadPoolExecutor  # noqa: WPS433
+            gh = [(s.profile.name, deliveries[s.profile.name], s.profile.base_branch) for s in scanned if deliveries[s.profile.name].get("remote_host") == "github"]
+            with ThreadPoolExecutor(max_workers=6) as ex:
+                for name, res in zip([g[0] for g in gh], ex.map(lambda g: self.ci_runs(g[1], g[2]), gh)):
+                    ci_map[name] = res
+        for s in scanned:
+            r = summaries[s.profile.name]
+            d = deliveries[s.profile.name]
+            stages = self.workflow_stages(r, d, ci_map.get(s.profile.name), activity)
+            reach = next((st["key"] for st in reversed(stages) if st["mode"] != "none"), None)
+            rows.append({"name": r["name"], "eligible": r["eligible"], "fe_be_ok": r["fe_be_ok"], "selected": r["selected"], "paused": r.get("paused", False),
+                         "summary": d.get("summary"), "remote_host": d.get("remote_host"), "aws": d.get("aws"), "deploy_mode": d.get("deploy_mode"), "deploy_target": d.get("deploy_target"),
+                         "reach": reach, "stages": stages, "ci": ci_map.get(s.profile.name)})
+        rows.sort(key=lambda x: (not x["eligible"], not x["fe_be_ok"], x["name"]))
+        totals = {"targets": sum(1 for x in rows if x["eligible"]), "push": sum(1 for x in rows if x["eligible"] and x["stages"][5]["mode"] == "auto"),
+                  "cicd": sum(1 for x in rows if x["eligible"] and x["stages"][6]["mode"] == "auto"),
+                  "deploy_auto": sum(1 for x in rows if x["eligible"] and x["stages"][7]["mode"] in ("actions", "fleet")),
+                  "aws": sum(1 for x in rows if x["eligible"] and x["aws"])}
+        return {"rows": rows, "totals": totals, "with_ci": with_ci, "github_token": bool(self._github_token()), "generated_at": now.strftime("%Y-%m-%dT%H:%M:%S")}
+
+    # ----- 제어 (요청 큐 / 일시정지 / 스케줄) -----
+    def _require_writable(self) -> None:
+        if not os.access(self.paths.fleet_dir, os.W_OK):
+            raise PermissionError(f"hermes-fleet 디렉터리에 쓸 수 없습니다 (읽기 전용 마운트?): {self.paths.fleet_dir}")
+
+    def requests(self) -> dict[str, Any]:
+        return {"pending": rq.list_pending(self.paths.state_dir), "recent": rq.list_done(self.paths.state_dir, 25),
+                "paused_repos": rq.paused_repos(self.paths.state_dir), "paused_all": self.paths.pause_file.exists()}
+
+    def create_request(self, repo: str, action: str, ticket: str | None = None) -> dict[str, Any]:
+        self._require_writable()
+        s = self.find(repo)
+        if s is None:
+            raise ValueError(f"root 아래에 없는 레포: {repo}")
+        if action != "stop" and not s.target:
+            raise ValueError(f"{repo} 은(는) fleet 대상이 아닙니다 (선택 여부/FE·BE 확인)")
+        if action == "deploy" and not s.profile.deploy.get("command"):
+            raise ValueError(f"{repo}: fleet.yaml repos.{repo}.deploy.command 가 없어 배포 요청을 만들 수 없습니다")
+        return rq.create_request(self.paths.state_dir, repo, action, ticket, source="web")
+
+    def cancel_request(self, request_id: str) -> bool:
+        self._require_writable()
+        return rq.cancel(self.paths.state_dir, request_id)
+
+    def set_repo_paused(self, repo: str, paused: bool) -> dict[str, Any]:
+        self._require_writable()
+        if self.find(repo) is None:
+            raise ValueError(f"root 아래에 없는 레포: {repo}")
+        rq.set_repo_paused(self.paths.state_dir, repo, paused, "paused from web")
+        return {"repo": repo, "paused": paused}
+
+    def set_paused_all(self, paused: bool) -> dict[str, Any]:
+        self._require_writable()
+        if paused:
+            self.paths.pause_file.parent.mkdir(parents=True, exist_ok=True)
+            self.paths.pause_file.write_text(f"paused from web at {time.strftime('%Y-%m-%d %H:%M:%S')}\n", encoding="utf-8")
+        elif self.paths.pause_file.exists():
+            self.paths.pause_file.unlink()
+        return {"paused": paused}
+
+    def update_schedule(self, fields: dict[str, Any]) -> dict[str, Any]:
+        if not self.paths.config_writable():
+            raise PermissionError(f"fleet.yaml 에 쓸 수 없습니다: {self.paths.config}")
+        clean = {k: v for k, v in fields.items() if k in SCHEDULE_KEYS and v is not None}
+        if not clean:
+            raise FleetFileError("바꿀 항목이 없습니다")
+        try:
+            result = update_schedule(self.paths.config, **clean)
+        except ValueError as exc:               # parse_window 의 형식 오류 포함
+            raise FleetFileError(str(exc)) from exc
+        cfg = self.config()
+        result["schedule"] = self.schedule(cfg, self.now())
         return result
 
     # ----- 티켓 -----
@@ -693,6 +886,9 @@ class Collector:
             "schedule": self.schedule(cfg, now), "daemon": self.daemon(cfg, now), "llm": self.llm(),
             "cursor": fleet.get("cursor"), "last_run": fleet.get("last_run"),
             "repos": repos, "eligible_count": len(targets), "totals": totals,
+            "control": {"writable": os.access(self.paths.fleet_dir, os.W_OK), "config_writable": self.paths.config_writable(),
+                        "paused_all": self.paths.pause_file.exists(), "paused_repos": rq.paused_repos(self.paths.state_dir),
+                        "pending": rq.list_pending(self.paths.state_dir), "recent": rq.list_done(self.paths.state_dir, 12)},
             "auto_merge": cfg.auto_merge, "discover": cfg.discover, "frontend_guide": self._frontend_guide_summary(),
             "monitor": {"uptime_seconds": round(time.time() - self.started_at), "in_docker": Path("/.dockerenv").exists()},
         }

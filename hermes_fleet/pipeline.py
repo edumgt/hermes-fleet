@@ -43,9 +43,14 @@ def excerpt(text: str, limit: int) -> str:
     return text if len(text) <= limit else text[:limit] + f"\n... (truncated, {len(text)} chars total)"
 
 
+class PipelineAborted(RuntimeError):
+    """stop 요청으로 단계 경계에서 중단됨."""
+
+
 class Pipeline:
     def __init__(self, profile: RepoProfile, ticket: Ticket, settings: Settings | None = None, org: dict[str, Any] | None = None,
-                 stages: list[str] | None = None, max_iterations: int | None = None, log: Logger = print) -> None:
+                 stages: list[str] | None = None, max_iterations: int | None = None, log: Logger = print,
+                 should_abort: Callable[[], bool] | None = None) -> None:
         self.profile = profile
         self.root = profile.root
         self.ticket = ticket
@@ -55,6 +60,7 @@ class Pipeline:
         self.max_iterations = max_iterations or self.settings.max_iterations
         self.workspace = profile.workspace_dir / ticket.id
         self.log = log
+        self.should_abort = should_abort
         self._llm = None
         self._tools: dict[str, Any] | None = None
         unknown = [s for s in self.stages if s not in self.org["stages"]]
@@ -159,9 +165,12 @@ class Pipeline:
     def _ensure_llm(self) -> None:
         if self._llm is None:
             self._llm = build_llm(self.settings)
-            self._tools = build_tools(self.root, self.settings)
+            self._tools = build_tools(self.root, self.settings, deny=self.profile.deny)
 
     def _run_stage(self, stage: str, iteration: int, description: str) -> StageResult:
+        if self.should_abort and self.should_abort():
+            self.log(f"[{self.profile.name}][{stage}] stop requested; aborting before stage")
+            raise PipelineAborted(f"aborted before stage {stage} (iteration {iteration}) by stop request")
         from crewai import Crew, Process, Task  # noqa: WPS433
 
         self._ensure_llm()

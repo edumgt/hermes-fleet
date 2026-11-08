@@ -18,15 +18,18 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
-from .backlog import Ticket, load_tickets
+from . import requests as rq
+from .backlog import Ticket, find_ticket, load_tickets
+from .discover import run_discover          # 데몬 시작 시점에 미리 적재 (hermes-fleet 자신이 대상일 때 브랜치 전환 중 지연 import 를 피한다)
 from .llm import check_endpoint
-from .merge import MergeConfig, auto_merge
+from .merge import MergeConfig, MergeReport, auto_merge
 from .org import load_org_for
-from .pipeline import Pipeline
+from .pipeline import Pipeline, PipelineAborted
 from .repos import FleetConfig, RepoProfile, eligible_repos
 from .schedule import can_start_work, is_active, parse_clock, parse_window
 from .settings import PAUSE_FILE, STATE_DIR, Settings
 from .tools import git
+from .workflow import run_deploy
 
 Logger = Callable[[str], None]
 PRIORITY_ORDER = {"P0": 0, "P1": 1, "P2": 2, "P3": 3}
@@ -87,6 +90,7 @@ class DaemonOptions:
     discover: bool = True
     max_tickets: int | None = None
     only: list[str] | None = None        # 특정 레포만
+    on_demand: bool = False              # 대기 중인 요청(state/requests)만 처리하고 종료. 시간대 무관. cron 2분 간격 러너용
 
 
 class FleetDaemon:
@@ -106,6 +110,7 @@ class FleetDaemon:
         self.merge_time = parse_clock(cfg.merge_at)
         self.processed = 0
         self.merge_cfg = MergeConfig.from_dict(cfg.auto_merge)
+        self._paused_logged: set[str] = set()
 
     # ---------- 상태 ----------
     def fleet_state_path(self) -> Path:
@@ -116,6 +121,8 @@ class FleetDaemon:
 
     # ---------- 메인 루프 ----------
     def run(self) -> int:
+        if self.options.on_demand:
+            return self._run_on_demand()
         self.log(f"[fleet] start root={self.cfg.root} hours={self.cfg.active_hours} merge_at={self.cfg.merge_at} model={self.settings.litellm_model} @ {self.settings.base_url}")
         while True:
             try:
@@ -137,12 +144,42 @@ class FleetDaemon:
             if outcome == "wait":
                 self.sleep(self.cfg.poll_seconds)
 
+    def _run_on_demand(self) -> int:
+        """웹/CLI 요청만 처리하고 종료. 요청이 없으면 아무 로그도 남기지 않는다(2분마다 돌아도 조용하도록)."""
+        if self.pause_file.exists() or rq.next_pending(self.state_dir) is None:
+            return 0
+        self.log(f"[fleet] on-demand start root={self.cfg.root} model={self.settings.litellm_model} @ {self.settings.base_url}")
+        while True:
+            try:
+                outcome = self.tick()
+            except KeyboardInterrupt:
+                outcome = "stop"
+            except Exception as exc:  # noqa: BLE001
+                self.log(f"[fleet] unexpected error: {exc}\n{traceback.format_exc()}")
+                outcome = "stop"
+            if outcome != "work":
+                break
+        self.log("[fleet] on-demand done; exiting")
+        return 0
+
     def tick(self) -> str:
         """'work' | 'wait' | 'stop'"""
+        self._refresh_config()
         if self.pause_file.exists():
+            if self.options.on_demand:
+                return "stop"
             self.log(f"[fleet] paused ({self.pause_file}); run `hermes-fleet resume`")
             return "wait"
         now = self.now()
+
+        # 0) 웹/CLI 요청 — 시간대와 무관하게 먼저 처리
+        req = rq.next_pending(self.state_dir)
+        if req:
+            self._handle_request(req)
+            return "work"
+        if self.options.on_demand:
+            return "stop"
+
         if not is_active(now.time(), self.window):
             return "stop" if self.options.exit_outside_window else "wait"
 
@@ -193,13 +230,117 @@ class FleetDaemon:
         return "wait"
 
     # ---------- 레포 선택/전제 ----------
+    def _refresh_config(self) -> None:
+        changed = self.cfg.refresh()
+        if not changed:
+            return
+        self.window = parse_window(self.cfg.active_hours)
+        self.merge_time = parse_clock(self.cfg.merge_at)
+        self.merge_cfg = MergeConfig.from_dict(self.cfg.auto_merge)
+        self.log(f"[fleet] fleet.yaml changed: {', '.join(changed)} (hours={self.cfg.active_hours} merge_at={self.cfg.merge_at} include={self.cfg.include} exclude={self.cfg.exclude})")
+
     def _targets(self) -> list[RepoProfile]:
-        if self.cfg.refresh_selection():
-            self.log(f"[fleet] fleet.yaml changed; include={self.cfg.include} exclude={self.cfg.exclude}")
+        self._refresh_config()
         profiles = self.repos(self.cfg)
         if self.options.only:
             profiles = [p for p in profiles if p.name in self.options.only]
-        return profiles
+        active = []
+        for p in profiles:
+            if rq.is_repo_paused(self.state_dir, p.name):
+                if p.name not in self._paused_logged:
+                    self.log(f"[fleet][{p.name}] paused (state/paused/{p.name}); skipping until resumed")
+                    self._paused_logged.add(p.name)
+                continue
+            self._paused_logged.discard(p.name)
+            active.append(p)
+        return active
+
+    # ---------- 요청(웹/CLI) ----------
+    def _handle_request(self, req: dict[str, Any]) -> None:
+        repo, action, ticket_id = req["repo"], req["action"], req.get("ticket")
+        rq.mark_running(self.state_dir, req)
+        self.log(f"[fleet][{repo}] ▶ request {action}{' ' + ticket_id if ticket_id else ''} ({req['id']})")
+        try:
+            status, detail = self._execute_request(repo, action, ticket_id)
+        except Exception as exc:  # noqa: BLE001
+            status, detail = "failed", str(exc)
+            self.log(f"[fleet][{repo}] request {action} error: {exc}\n{traceback.format_exc()}")
+        rq.complete(self.state_dir, req, status, detail)
+        self.log(f"[fleet][{repo}] ■ request {action}: {status} — {detail[:200]}")
+
+    def _execute_request(self, repo: str, action: str, ticket_id: str | None) -> tuple[str, str]:
+        if action == "stop":
+            rq.set_repo_paused(self.state_dir, repo, True, "stopped from request")
+            return "done", "nothing running; repo paused (resume to continue)"
+        p = next((x for x in self.repos(self.cfg) if x.name == repo), None)
+        if p is None:
+            return "failed", "not a fleet target (FE/BE 미확인이거나 선택되지 않음)"
+        if rq.is_repo_paused(self.state_dir, repo):
+            return "skipped", "repo is paused; resume first"
+        if not self._ready(p):
+            return "skipped", f"repo not on {p.base_branch} or working tree dirty; left for a human"
+        if action == "deploy":
+            if not p.deploy.get("command"):
+                return "skipped", "fleet.yaml repos.<repo>.deploy.command 가 없습니다"
+            self.log(f"[fleet][{p.name}] ▶ deploy (request)")
+            ok, detail = run_deploy(p.root, p.deploy, log=self.log, timeout=self.merge_cfg.verify_timeout)
+            state = load_state(self.repo_state_path(p.name))
+            state["last_deploy"] = {"ok": ok, "detail": detail, "at": time.strftime("%Y-%m-%d %H:%M:%S"), "target": p.deploy.get("target"), "source": "request"}
+            save_state(state, self.repo_state_path(p.name))
+            self.log(f"[fleet][{p.name}] ■ deploy: {'ok' if ok else 'failed'}")
+            return ("done" if ok else "failed"), detail.splitlines()[0] if detail else ""
+        if action == "merge":
+            report = self._run_merge(p)
+            return "done", f"merged={[o.ticket_id for o in report.merged]} pushed={report.pushed}" + (f" note={report.note}" if report.note else "")
+        if action in ("approve", "retry"):
+            ticket = find_ticket(ticket_id, p.backlog_dir)
+            state = load_state(self.repo_state_path(p.name))
+            if action == "approve":
+                if ticket.status != "proposed":
+                    return "skipped", f"{ticket.id} status={ticket.status} (needs proposed)"
+                ticket.set_status("todo")
+                git.commit_all(f"chore({ticket.id}): approve → todo (request)", p.root)
+                return "done", f"{ticket.id} approved → todo"
+            removed = state.get("tickets", {}).pop(ticket.id, None)
+            if ticket.status in ("blocked", "in-progress", "review"):
+                ticket.set_status("todo")
+                git.commit_all(f"chore({ticket.id}): retry → todo (request)", p.root)
+            elif ticket.status != "todo":
+                return "skipped", f"{ticket.id} status={ticket.status} (needs blocked/todo)"
+            save_state(state, self.repo_state_path(p.name))
+            return "done", f"{ticket.id} reset → todo" + (" (previous run record cleared)" if removed else "")
+        info = check_endpoint(self.settings)
+        if not info["ok"]:
+            return "failed", f"LLM endpoint unreachable ({info['error']})"
+        if action == "discover":
+            ensure_scaffold(p)
+            created = self._run_discover(p)
+            return "done", f"discover finished: {len(created)} proposal(s)"
+        state = load_state(self.repo_state_path(p.name))
+        if ticket_id:
+            ticket = find_ticket(ticket_id, p.backlog_dir)
+            if ticket.status != "todo":
+                return "skipped", f"{ticket.id} status={ticket.status} (needs todo; approve/retry first)"
+            state.get("tickets", {}).pop(ticket.id, None)   # 재실행 허용
+        else:
+            ticket = pick_next(load_tickets(p.backlog_dir), state)
+            if ticket is None:
+                return "skipped", "no todo tickets (approve a proposal first)"
+        fleet_state = load_state(self.fleet_state_path())
+        self._run_ticket(p, ticket, state)
+        self._advance(fleet_state, p)
+        entry = state.get("tickets", {}).get(ticket.id, {})
+        ok = entry.get("verdict") in ("PASS", "FAIL")
+        return ("done" if ok else "failed"), f"{ticket.id} → {entry.get('status')} (QA {entry.get('verdict')}, {entry.get('seconds')}s)" + (f": {entry.get('error')}" if entry.get("error") else "")
+
+    def _abort_requested(self, repo: str) -> bool:
+        """진행 중인 티켓의 단계 경계에서 호출. stop 요청이 있으면 그 요청을 끝내고 레포를 일시정지한 뒤 True."""
+        req = rq.pending_for(self.state_dir, repo, "stop")
+        if not req:
+            return False
+        rq.complete(self.state_dir, req, "done", "running ticket aborted at stage boundary; repo paused")
+        rq.set_repo_paused(self.state_dir, repo, True, "stopped from request")
+        return True
 
     def _ready(self, p: RepoProfile) -> bool:
         branch = git.current_branch(p.root)
@@ -226,7 +367,7 @@ class FleetDaemon:
         state = load_state(self.repo_state_path(p.name))
         return state.get("last_merge_date") != now.date().isoformat()
 
-    def _run_merge(self, p: RepoProfile) -> None:
+    def _run_merge(self, p: RepoProfile) -> MergeReport:
         state = load_state(self.repo_state_path(p.name))
         state["last_merge_date"] = self.now().date().isoformat()
         if git.current_branch(p.root).startswith("hermes/") and git.is_clean(p.root):
@@ -235,8 +376,11 @@ class FleetDaemon:
         report = auto_merge(p, self.merge_cfg, log=self.log)
         state["last_merge"] = {"at": report.started_at, "merged": [o.ticket_id for o in report.merged], "pushed": report.pushed, "note": report.note,
                                "issues": [f"{o.ticket_id}:{o.result}" for o in report.outcomes if o.result in ("conflict", "verify-failed")]}
+        if getattr(report, "deploy", None):
+            state["last_deploy"] = {**report.deploy, "source": "merge"}
         save_state(state, self.repo_state_path(p.name))
         self.log(f"[fleet][{p.name}] ■ daily merge: merged={len(report.merged)} pushed={report.pushed}")
+        return report
 
     # ---------- 티켓 ----------
     def _run_ticket(self, p: RepoProfile, ticket: Ticket, state: dict[str, Any]) -> None:
@@ -244,13 +388,21 @@ class FleetDaemon:
         started = time.time()
         entry: dict[str, Any] = {"branch": f"hermes/{ticket.id}", "started_at": time.strftime("%Y-%m-%dT%H:%M:%S")}
         ensure_scaffold(p)
-        pipe = Pipeline(p, ticket, settings=self.settings, org=load_org_for(p), log=self.log)
+        pipe = Pipeline(p, ticket, settings=self.settings, org=load_org_for(p), log=self.log, should_abort=lambda: self._abort_requested(p.name))
         try:
             result = pipe.run(create_branch=True, commit=False)
             verdict = "PASS" if result.passed else "FAIL" if result.passed is False else "N/A"
             ticket.set_status("review" if result.passed else "blocked")
             entry.update(verdict=verdict, iterations=result.iterations, status=ticket.status)
             msg = f"hermes({ticket.id}): {ticket.title}\n\nQA verdict: {verdict} (iterations={result.iterations})\nartifacts: hermes/workspace/{ticket.id}/"
+        except PipelineAborted as exc:
+            self.log(f"[fleet][{p.name}] ⏹ {ticket.id} aborted: {exc}")
+            entry.update(verdict="ABORTED", error=str(exc), status="blocked")
+            try:
+                ticket.set_status("blocked")
+            except Exception:  # noqa: BLE001
+                pass
+            msg = f"hermes({ticket.id}): partial work (aborted by stop request)\n\n{exc}"
         except Exception as exc:  # noqa: BLE001
             self.log(f"[fleet][{p.name}] ✗ {ticket.id} failed: {exc}")
             entry.update(verdict="ERROR", error=str(exc), status="blocked")
@@ -277,9 +429,7 @@ class FleetDaemon:
             return False
         return True
 
-    def _run_discover(self, p: RepoProfile) -> None:
-        from .discover import run_discover  # noqa: WPS433
-
+    def _run_discover(self, p: RepoProfile) -> list[Path]:
         self.log(f"[fleet][{p.name}] ▶ discover (Tech Lead)")
         ensure_scaffold(p)
         created = run_discover(p, self.settings, max_proposals=int(self.cfg.discover.get("max_proposals", 2)), log=self.log)
@@ -289,3 +439,4 @@ class FleetDaemon:
             self.log(f"[fleet][{p.name}] ■ proposed {len(created)} tickets")
         else:
             self.log(f"[fleet][{p.name}] ■ discover produced no new tickets")
+        return created

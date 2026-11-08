@@ -8,13 +8,13 @@ from hermes_fleet.discover import discover_prompt
 from hermes_fleet.org import load_org_for, load_template
 from hermes_fleet.repos import detect_profile
 
-KEYWORDS = ("AG Grid Community", "ApexCharts", "Lightweight Charts", "Tailwind", "Pretendard")
+KEYWORDS = ("AG Grid Community", "ApexCharts", "Lightweight Charts", "Tailwind", "Pretendard", "오프캔버스", "햄버거")
 
 
 def test_template_guide_renders_with_all_stack_items():
     org = load_template()
     g = org["frontend_guide"]
-    assert [i["area"] for i in g["stack"]] == ["CSS", "폰트", "표", "차트"]
+    assert [i["area"] for i in g["stack"]] == ["CSS", "폰트", "표", "레이아웃·내비게이션", "차트"]
     text = prompts.render_frontend_guide(g)
     for k in KEYWORDS:
         assert k in text
@@ -36,7 +36,7 @@ def test_prompts_include_guide_only_when_given(node_python_repo: Path):
         assert note in text
         for k in KEYWORDS:
             assert k in text
-    assert "## 7. 의존성" in design and "FE-GUIDE" in qa and "5. 프런트엔드 변경이 있으면" in qa
+    assert "## 7. 의존성" in design and "오프캔버스 좌측 사이드바 안에 배치" in design and "FE-GUIDE" in qa and "5. 프런트엔드 변경이 있으면" in qa
     # 가이드를 안 넘기면(끈 레포) 흔적이 없다
     assert "Pretendard" not in prompts.dev_task("T", "PRD", "p", None, None, None, 1, p.profile_text())
     assert "참고:" not in prompts.qa_task("T", "P", "p", "D", "d", 1, p.profile_text())

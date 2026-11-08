@@ -16,6 +16,7 @@ from .backlog import Ticket, TicketError
 from .repos import RepoProfile
 from .settings import REPO_BACKLOG_DIR
 from .tools import git
+from .workflow import run_deploy
 
 Logger = Callable[[str], None]
 Verifier = Callable[[Path, Logger], tuple[bool, str]]
@@ -52,6 +53,7 @@ class MergeReport:
     outcomes: list[MergeOutcome] = field(default_factory=list)
     pushed: bool = False
     note: str = ""
+    deploy: dict | None = None     # fleet 모드 배포 결과 {ok, detail, at}
 
     @property
     def merged(self) -> list[MergeOutcome]:
@@ -185,6 +187,11 @@ def auto_merge(profile: RepoProfile, config: MergeConfig, log: Logger = print, v
             for o in report.merged:
                 _run(["git", "push", "origin", "--delete", o.branch], root, timeout=60)
         log(f"[merge][{profile.name}] pushed to origin" if report.pushed else f"[merge][{profile.name}] push failed: {push.stderr.strip()[-300:]}")
+        if report.pushed and profile.deploy.get("trigger") == "fleet" and profile.deploy.get("command"):
+            log(f"[merge][{profile.name}] ▶ deploy ({profile.deploy.get('target') or 'fleet.yaml deploy.command'})")
+            ok, detail = run_deploy(root, profile.deploy, log=log, timeout=config.verify_timeout)
+            report.deploy = {"ok": ok, "detail": detail, "at": time.strftime("%Y-%m-%d %H:%M:%S"), "target": profile.deploy.get("target")}
+            log(f"[merge][{profile.name}] {'✓ deployed' if ok else '✗ deploy failed'}: {detail.splitlines()[0] if detail else ''}")
     _write_report(report, profile)
     return report
 
@@ -198,5 +205,7 @@ def _write_report(report: MergeReport, profile: RepoProfile) -> None:
     for o in report.outcomes:
         lines.append(f"- {o.result:14s} {o.branch} ({o.ticket_id}) {o.detail.splitlines()[0] if o.detail else ''}")
     lines.append(f"- pushed: {report.pushed}")
+    if report.deploy:
+        lines.append(f"- deploy: {'ok' if report.deploy['ok'] else 'failed'} {report.deploy.get('target') or ''} — {str(report.deploy.get('detail', '')).splitlines()[0]}")
     with out.open("a", encoding="utf-8") as fh:
         fh.write("\n".join(lines) + "\n\n")

@@ -7,9 +7,11 @@ set -euo pipefail
 FLEET_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 MARK="# hermes-fleet"
 LINE="*/10 1-7 * * * cd $FLEET_DIR && /usr/bin/flock -n $FLEET_DIR/state/daemon.lock $FLEET_DIR/scripts/hermes-fleet daemon >> $FLEET_DIR/logs/daemon.log 2>&1 $MARK"
+# 웹 모니터/CLI 의 요청(state/requests)을 시간대 밖에서도 2분 안에 처리하는 러너. 같은 flock 이라 야간 데몬과 겹치지 않는다. 요청이 없으면 조용히 종료.
+LINE2="*/2 * * * * cd $FLEET_DIR && /usr/bin/flock -n $FLEET_DIR/state/daemon.lock $FLEET_DIR/scripts/hermes-fleet daemon --on-demand >> $FLEET_DIR/logs/daemon.log 2>&1 $MARK-ondemand"
 
 mkdir -p "$FLEET_DIR/state" "$FLEET_DIR/logs"
-current="$(crontab -l 2>/dev/null | grep -v "$MARK" || true)"
+current="$(crontab -l 2>/dev/null | grep -v "$MARK" || true)"   # $MARK 로 끝나는 줄과 $MARK-ondemand 줄 모두 제거
 if [ "${1:-}" = "--remove" ]; then
   printf '%s\n' "$current" | crontab -
   echo "✓ hermes-fleet cron 항목 제거"
@@ -18,7 +20,7 @@ fi
 if ! pgrep -x cron >/dev/null 2>&1; then
   echo "⚠ cron 데몬이 실행 중이 아닙니다. 'sudo service cron start' 후 다시 실행하세요." >&2
 fi
-printf '%s\n%s\n' "$current" "$LINE" | sed '/^$/d' | crontab -
+printf '%s\n%s\n%s\n' "$current" "$LINE" "$LINE2" | sed '/^$/d' | crontab -
 echo "✓ cron 등록:"
 crontab -l | grep "$MARK"
 echo "  로그: tail -f $FLEET_DIR/logs/daemon.log"

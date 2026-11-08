@@ -25,6 +25,8 @@ services:
       # Windows 호스트의 Ollama. Docker Desktop 은 host.docker.internal 을 제공한다. 다른 곳이면 HERMES_BASE_URL 로 지정.
       OLLAMA_HOST: "${MONITOR_OLLAMA_HOST:-host.docker.internal:11434}"
       HERMES_BASE_URL: "${MONITOR_HERMES_BASE_URL:-}"
+      # GitHub Actions 실행 상태 조회용(비공개 레포면 필요). repo 읽기 권한의 fine-grained 토큰이면 충분.
+      MONITOR_GITHUB_TOKEN: "${MONITOR_GITHUB_TOKEN:-}"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     read_only: true

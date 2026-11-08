@@ -142,6 +142,7 @@
     if (name === "timeline") loadTimeline();
     if (name === "tickets") loadTickets();
     if (name === "repo") { if (state.repo) loadRepo(state.repo); else { $("#r-empty").hidden = false; fillRepoSelect(); } }
+    if (name === "workflow") loadWorkflow();
   }
   $$(".tab").forEach((b) => b.addEventListener("click", () => showTab(b.dataset.tab)));
 
@@ -170,6 +171,7 @@
       { label: "LLM 엔드포인트", value: llm.ok ? `<span class="c-good">정상</span>` : `<span class="c-crit">불가</span>`, sub: llm.ok ? `${llm.model}${llm.missing_models.length ? ` · 누락: ${llm.missing_models.join(", ")}` : ""}` : (llm.error || "") },
       { label: "대상 레포", value: `${o.eligible_count}`, sub: `${o.repos.length}개 저장소 중 선택 ${o.repos.filter((r) => r.selected).length} · 커서 ${o.cursor || "-"}` },
       { label: "진행/리뷰 티켓", value: `${active}`, sub: `전체 ${total} · 승인 대기 ${o.totals.proposed} · 막힘 ${o.totals.blocked} · 처리 누적 ${processed}` },
+      { label: "전개 범위", value: state.workflowTotals ? `<span style="font-size:16px">AWS <span class="c-good">${state.workflowTotals.aws}</span> · push <span class="c-good">${state.workflowTotals.push}</span> / ${state.workflowTotals.targets}</span>` : `<span class="c-muted">…</span>`, sub: state.workflowTotals ? `대상 ${state.workflowTotals.targets}개 중 자동 배포 ${state.workflowTotals.deploy_auto} · CI/CD ${state.workflowTotals.cicd}` : "워크플로 탭에서 계산" },
       { label: "현재 작업", value: d.activity ? `<span class="c-good" style="font-size:16px">${esc(d.activity.kind === "ticket" ? d.activity.id : d.activity.kind)}</span>` : `<span class="c-muted">없음</span>`, sub: d.activity ? `${d.activity.repo}${d.activity.stage ? ` · ${d.activity.stage.name} #${d.activity.stage.iteration}` : ""} · ${ago(d.activity.since)} 시작` : d.status === "running" ? "대기(폴링) 중" : "-" },
     ];
     $("#tiles").innerHTML = tiles.map((t) => `<div class="tile"><div class="label">${t.label}</div><div class="value">${t.value}</div><div class="sub">${esc(t.sub)}</div></div>`).join("");
@@ -209,6 +211,7 @@
     $("#repo-note").textContent = o.config_writable
       ? "체크 = fleet 작업 대상(fleet.yaml include/exclude 를 편집, 데몬은 다음 tick 에 반영). 행을 클릭하면 작업 내역을 봅니다."
       : "fleet.yaml 이 읽기 전용이라 선택을 바꿀 수 없습니다. 행을 클릭하면 작업 내역을 봅니다.";
+    renderControl(o);
     renderRepoGrid(o.repos);
     renderOverviewCharts(o, state.stats);
   }
@@ -216,7 +219,8 @@
   function renderRepoGrid(repos) {
     const cols = [
       { headerName: "대상", field: "selected", width: 72, cellRenderer: SwitchRenderer, sortable: true, cellClass: "cell-center" },
-      { headerName: "레포", field: "name", minWidth: 150, flex: 1.2, cellRenderer: htmlCell((d) => `<strong>${esc(d.name)}</strong>${d.has_remote ? "" : ` <span class="muted" title="원격 없음">⌂</span>`}`) },
+      { headerName: "레포", field: "name", minWidth: 150, flex: 1.2, cellRenderer: htmlCell((d) => `<strong>${esc(d.name)}</strong>${d.has_remote ? "" : ` <span class="muted" title="원격 없음">⌂</span>`}${d.paused ? ` ${badge("일시정지", "serious")}` : ""}${(d.pending_requests || []).length ? ` <span class="muted" title="${esc(d.pending_requests.join(", "))}">⏳${d.pending_requests.length}</span>` : ""}`) },
+      { headerName: "제어", field: "actions", width: 300, sortable: false, cellRenderer: ActionsRenderer, cellClass: "cell-center" },
       { headerName: "FE", field: "frontend", minWidth: 120, flex: 1, valueFormatter: (p) => p.value || "-" },
       { headerName: "BE", field: "backend", minWidth: 140, flex: 1, valueFormatter: (p) => p.value || "-" },
       { headerName: "브랜치", field: "current_branch", minWidth: 100, cellRenderer: htmlCell((d) => d.current_branch ? `${esc(d.current_branch)}${d.on_base ? "" : ` <span class="c-warn" title="기준 브랜치 아님">≠${esc(d.base_branch)}</span>`}` : `<span class="muted">${esc(d.base_branch || "-")}</span>`) },
@@ -232,7 +236,7 @@
       gridOptions: {
         domLayout: "autoHeight", getRowId: (p) => p.data.name, rowHeight: 38,
         rowClassRules: { "ag-row-dim": (p) => !p.data.eligible, "ag-row-pointer": () => true },
-        onRowClicked: (e) => { if (e.event && e.event.target.closest && e.event.target.closest(".cell-switch")) return; openRepo(e.data.name); },
+        onRowClicked: (e) => { if (e.event && e.event.target.closest && e.event.target.closest(".cell-switch, .cell-actions")) return; openRepo(e.data.name); },
         tooltipShowDelay: 300,
       },
     });
@@ -251,6 +255,94 @@
       toast(`선택 변경 실패: ${e.message}`);
     }
   }
+
+  // ---------- 제어 ----------
+  const ACTION_KO = { run: "실행", discover: "발굴", merge: "머지", approve: "승인", retry: "재시도", stop: "중지", deploy: "배포" };
+  async function sendRequest(repo, action, ticket) {
+    try {
+      const r = await api(`/api/repos/${encodeURIComponent(repo)}/requests`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action, ticket: ticket || null }) });
+      toast(`${repo}: ${ACTION_KO[action] || action}${ticket ? " " + ticket : ""} 요청을 큐에 넣었습니다 (${r.id.slice(0, 15)}…)`, true);
+      await refresh();
+      if (state.tab === "repo" && state.repo) loadRepo(state.repo);
+    } catch (e) { toast(`요청 실패: ${e.message}`); }
+  }
+  async function setRepoPaused(repo, paused) {
+    try {
+      await api(`/api/repos/${encodeURIComponent(repo)}/pause`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ paused }) });
+      toast(`${repo}: ${paused ? "일시정지" : "재개"}`, true);
+      await refresh();
+      if (state.tab === "repo" && state.repo) loadRepo(state.repo);
+    } catch (e) { toast(`변경 실패: ${e.message}`); }
+  }
+  async function cancelRequest(id) {
+    try { await api(`/api/requests/${encodeURIComponent(id)}`, { method: "DELETE" }); toast("요청을 취소했습니다", true); refresh(); } catch (e) { toast(`취소 실패: ${e.message}`); }
+  }
+  function actionButtons(r, size = "sm") {
+    const w = state.overview && state.overview.control && state.overview.control.writable;
+    const busy = (a) => (r.pending_requests || []).some((x) => x === a || x.startsWith(a + " "));
+    const dis = (a) => (!w || !r.eligible || r.paused || busy(a) ? "disabled" : "");
+    const b = (a, label, cls = "", title = "") => `<button class="btn ${size} ${cls}" data-act="${a}" data-repo="${esc(r.name)}" ${dis(a)} title="${esc(title)}">${busy(a) ? "⏳ " : ""}${label}</button>`;
+    return [
+      b("run", "▶ 실행", "", "다음 todo 티켓을 지금 실행(시간대 무관, 호스트 러너)"),
+      b("discover", "🔍 발굴", "", "Tech Lead 발굴 → proposed 티켓"),
+      b("merge", "⇅ 머지", "", "review 브랜치를 지금 머지·검증"),
+      r.paused
+        ? `<button class="btn ${size}" data-act="resume" data-repo="${esc(r.name)}" ${w ? "" : "disabled"} title="일시정지 해제">▶ 재개</button>`
+        : `<button class="btn ${size} warn" data-act="stop" data-repo="${esc(r.name)}" ${w && r.fe_be_ok ? "" : "disabled"} title="진행 중 작업을 단계 경계에서 멈추고 이 레포를 일시정지">⏹ 중지</button>`,
+    ].join("");
+  }
+  function bindActions(root) {
+    $$("button[data-act]", root).forEach((b) => b.addEventListener("click", (ev) => {
+      ev.stopPropagation();
+      const { act, repo, ticket } = b.dataset;
+      if (act === "resume") return setRepoPaused(repo, false);
+      if (act === "pause") return setRepoPaused(repo, true);
+      if (act === "stop" && !confirm(`${repo}: 진행 중인 작업을 단계 경계에서 중단하고 레포를 일시정지합니다. 계속할까요?`)) return;
+      return sendRequest(repo, act, ticket);
+    }));
+  }
+  class ActionsRenderer {
+    init(p) { this.eGui = document.createElement("span"); this.eGui.className = "cell-actions"; this.eGui.innerHTML = actionButtons(p.data); this.eGui.addEventListener("click", (ev) => ev.stopPropagation()); bindActions(this.eGui); }
+    getGui() { return this.eGui; }
+    refresh(p) { this.eGui.innerHTML = actionButtons(p.data); bindActions(this.eGui); return true; }
+  }
+  function renderControl(o) {
+    const c = o.control || {};
+    const w = !!c.writable;
+    $("#ctl-note").textContent = w ? "" : "hermes-fleet 디렉터리가 읽기 전용이라 제어할 수 없습니다.";
+    const pa = $("#ctl-pause-all");
+    pa.textContent = c.paused_all ? "▶ 전체 재개" : "⏸ 전체 일시정지";
+    pa.className = `btn ${c.paused_all ? "primary" : "warn"}`;
+    pa.disabled = !w;
+    pa.onclick = async () => {
+      try { await api("/api/pause", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ paused: !c.paused_all }) }); toast(c.paused_all ? "재개했습니다" : "전체 일시정지했습니다", true); refresh(); } catch (e) { toast(`실패: ${e.message}`); }
+    };
+    const f = $("#sched-form");
+    if (document.activeElement && f.contains(document.activeElement)) { /* 편집 중이면 값 덮어쓰지 않음 */ } else {
+      f.active_hours.value = o.schedule.active_hours || "";
+      f.merge_at.value = o.schedule.merge_at || "";
+      f.no_new_work_minutes_before_end.value = o.schedule.no_new_work_minutes_before_end;
+      f.poll_seconds.value = o.schedule.poll_seconds;
+    }
+    $$("input,button", f).forEach((el) => (el.disabled = !c.config_writable));
+    const reqRow = (r, cancellable) => `<div class="req ${esc(r.status)}"><span class="ts">${fmtTs(r.finished_at || r.started_at || r.requested_at).slice(5)}</span><span class="act">${esc(r.status)} · ${esc(ACTION_KO[r.action] || r.action)}${r.ticket ? " " + esc(r.ticket) : ""}</span><span class="detail" title="${esc(r.detail || "")}"><a href="#" data-open-repo="${esc(r.repo)}">${esc(r.repo)}</a>${r.detail ? " — " + esc(r.detail) : ""}</span><span>${cancellable && r.status === "pending" ? `<button class="btn sm" data-cancel="${esc(r.id)}">취소</button>` : ""}</span></div>`;
+    $("#req-pending").innerHTML = (c.pending || []).length ? c.pending.map((r) => reqRow(r, true)).join("") : `<div class="empty">대기 중인 요청이 없습니다.</div>`;
+    $("#req-recent").innerHTML = (c.recent || []).length ? c.recent.map((r) => reqRow(r, false)).join("") : `<div class="empty">아직 처리된 요청이 없습니다.</div>`;
+    $$("#req-pending button[data-cancel]").forEach((b) => b.addEventListener("click", () => cancelRequest(b.dataset.cancel)));
+    $$("#req-pending a[data-open-repo], #req-recent a[data-open-repo]").forEach((a) => a.addEventListener("click", (ev) => { ev.preventDefault(); openRepo(a.dataset.openRepo); }));
+  }
+  $("#sched-form").addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    const f = ev.target;
+    const body = { active_hours: f.active_hours.value.trim(), merge_at: f.merge_at.value.trim(), no_new_work_minutes_before_end: Number(f.no_new_work_minutes_before_end.value), poll_seconds: Number(f.poll_seconds.value) };
+    try {
+      const r = await api("/api/schedule", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+      $("#sched-msg").textContent = r.changed ? "저장됨 — 데몬은 다음 tick 에 반영" : "변경 없음";
+      toast("스케줄을 저장했습니다", true);
+      document.activeElement.blur();
+      refresh();
+    } catch (e) { toast(`저장 실패: ${e.message}`); }
+  });
 
   function renderOverviewCharts(o, st) {
     const pal = palette();
@@ -321,7 +413,11 @@
     sw.checked = !!r.selected;
     sw.disabled = !r.fe_be_ok || !(state.overview && state.overview.config_writable);
     $("#r-switch-label").textContent = r.eligible ? "fleet 대상" : r.selected ? "선택됨 (FE/BE 미확인)" : "제외됨";
+    $("#r-actions").innerHTML = actionButtons(r, "");
+    bindActions($("#r-actions"));
     $("#r-badges").innerHTML = [
+      r.paused ? badge("일시정지", "serious") : "",
+      (r.pending_requests || []).length ? badge(`요청 대기: ${r.pending_requests.join(", ")}`) : "",
       r.fe_be_ok ? badge("FE·BE 확인", "good") : badge("FE/BE 미확인", "serious"),
       r.current_branch ? (r.on_base ? badge(`on ${r.base_branch}`, "good") : badge(`on ${r.current_branch}`, "warn")) : "",
       r.clean == null ? "" : r.clean ? badge("clean", "good") : badge("dirty · 건너뜀", "warn"),
@@ -389,6 +485,7 @@
     setRows("merges", r.merge_history || []);
     $("#r-merge-count").textContent = `(${(r.merge_history || []).length})`;
 
+    renderDelivery(r);
     $("#r-log").innerHTML = (r.log_lines || []).length ? r.log_lines.map(logLineHtml).join("") : `<span class="ln plain">이 레포에 대한 로그가 아직 없습니다.</span>`;
     $("#r-log").scrollTop = $("#r-log").scrollHeight;
   }
@@ -433,7 +530,8 @@
       const t = await api(`/api/repos/${encodeURIComponent(repo)}/tickets/${encodeURIComponent(id)}`);
       const e = t.state;
       box.innerHTML = `
-        <div class="detail-head"><h2><span class="mono">${esc(t.id)}</span> ${esc(t.title)}</h2>${badge(t.priority)} ${stBadge(t.status)} ${badge(t.area)}<button class="ghost close" id="ticket-close">닫기</button></div>
+        <div class="detail-head"><h2><span class="mono">${esc(t.id)}</span> ${esc(t.title)}</h2>${badge(t.priority)} ${stBadge(t.status)} ${badge(t.area)}
+          <span class="actions" id="ticket-actions">${ticketButtons(t)}</span><button class="ghost close" id="ticket-close">닫기</button></div>
         <dl class="kv" style="margin-top:10px">
           <dt>레포</dt><dd><a href="#" id="ticket-repo-link">${esc(t.repo)}</a></dd>
           <dt>파일</dt><dd class="mono">${esc(t.path || "(기준 브랜치에 없음 — 브랜치에서 읽음)")}</dd>
@@ -453,6 +551,7 @@
         <h3>산출물</h3>
         ${t.artifacts.length ? `<div class="artifact-tabs" id="art-tabs">${t.artifacts.map((a) => `<button data-name="${esc(a.name)}" title="${a.source === "branch" ? "브랜치에서 읽음" : esc(a.mtime || "")}">${esc(a.name)}${a.source === "branch" ? " ⎇" : ""}</button>`).join("")}</div><pre class="doc" id="art-body">파일을 선택하세요.</pre>` : `<div class="empty">산출물이 아직 없습니다.</div>`}`;
       $("#ticket-close").addEventListener("click", () => (box.hidden = true));
+      bindActions($("#ticket-actions"));
       $("#ticket-repo-link").addEventListener("click", (ev) => { ev.preventDefault(); openRepo(t.repo); });
       $$("#art-tabs button").forEach((b) => b.addEventListener("click", async () => {
         $$("#art-tabs button").forEach((x) => x.classList.toggle("active", x === b));
@@ -471,6 +570,16 @@
     }
   }
 
+  function ticketButtons(t) {
+    const repo = state.repos.find((r) => r.name === t.repo) || {};
+    const w = state.overview && state.overview.control && state.overview.control.writable && repo.eligible && !repo.paused;
+    const b = (a, label, title) => `<button class="btn sm" data-act="${a}" data-repo="${esc(t.repo)}" data-ticket="${esc(t.id)}" ${w ? "" : "disabled"} title="${esc(title)}">${label}</button>`;
+    if (t.status === "proposed") return b("approve", "✓ 승인", "proposed → todo (호스트 러너가 커밋)");
+    if (t.status === "blocked") return b("retry", "↺ 재시도 준비", "blocked → todo, 이전 처리 기록 삭제") ;
+    if (t.status === "todo") return b("run", "▶ 이 티켓 실행", "지금 이 티켓만 실행(시간대 무관)");
+    return "";
+  }
+
   function renderTicketTimeline(t) {
     if (state.charts["t-timeline"]) { state.charts["t-timeline"].destroy(); delete state.charts["t-timeline"]; }
     const pal = palette();
@@ -487,6 +596,60 @@
       tooltip: { x: { format: "HH:mm:ss" }, custom: ({ seriesIndex, dataPointIndex, w }) => { const d = w.config.series[seriesIndex].data[dataPointIndex]; return `<div style="padding:6px 10px">${esc(d.x)} · ${dur(Math.round((d.y[1] - d.y[0]) / 1000))}</div>`; } },
       legend: { show: false },
     }));
+  }
+
+  // ---------- 워크플로 보드 ----------
+  const MODE_KO = { auto: "자동", manual: "사람", none: "—", actions: "Actions 자동", fleet: "fleet 자동" };
+  function stageCell(s, repo, single) {
+    const count = s.count != null && s.mode !== "none" ? `<span class="big">${s.count}${s.fail ? ` <span class="c-crit" style="font-size:12px">/ ${s.fail}</span>` : ""}</span>` : (s.target ? `<span class="big" style="font-size:12px">${esc(s.target)}</span>` : "");
+    const link = s.link ? `<a href="${esc(s.link)}" target="_blank" rel="noopener" title="열기">↗</a>` : "";
+    const btn = single && s.key === "deploy" && s.can_request ? `<button class="btn sm" data-act="deploy" data-repo="${esc(repo)}" title="호스트가 fleet.yaml deploy.command 실행">🚀 배포 요청</button>` : "";
+    return `<div class="wf-stage mode-${esc(s.mode)} status-${esc(s.status || "idle")}" title="${esc(s.detail || "")}">
+      ${s.aws ? `<span class="aws">AWS</span>` : ""}
+      <span class="lb"><span class="dot"></span>${esc(s.label)} <span class="muted" style="font-weight:400">${esc(MODE_KO[s.mode] || s.mode)}</span> ${link}</span>
+      ${count}<span class="dt">${esc(s.detail || "")}</span>${s.at ? `<span class="ts">${fmtTs(s.at).slice(5, 16)}</span>` : ""}${btn}</div>`;
+  }
+  function renderBoard(el, rows, single) {
+    el.innerHTML = rows.map((r) => `<div class="wf-row ${r.eligible ? "" : "dim"}" data-repo="${esc(r.name)}">
+      ${single ? "" : `<div class="wf-repo"><span class="name">${esc(r.name)} ${r.paused ? badge("일시정지", "serious") : ""}${r.eligible ? "" : r.fe_be_ok ? badge("제외", "warn") : badge("FE/BE 없음")}</span><span class="sum">${esc(r.summary || "")}</span></div>`}
+      <div class="wf-chain">${r.stages.map((s) => stageCell(s, r.name, single)).join("")}</div></div>`).join("");
+    $$(".wf-repo", el).forEach((x) => x.addEventListener("click", () => openRepo(x.parentElement.dataset.repo)));
+    bindActions(el);
+  }
+  async function loadWorkflow() {
+    const ci = $("#wf-ci").checked;
+    $("#wf-meta").textContent = "불러오는 중…";
+    try {
+      const b = await api(`/api/workflow?ci=${ci}`);
+      state.workflowTotals = b.totals;
+      $("#wf-meta").textContent = `${fmtTs(b.generated_at)} 기준${ci ? (b.github_token ? " · Actions 조회(토큰)" : " · Actions 조회(공개 레포만, 토큰 없음)") : ""}`;
+      const t = b.totals;
+      $("#wf-summary").innerHTML = `대상 레포 <strong>${t.targets}</strong>개 중 GitHub push 까지 <strong>${t.push}</strong>, CI/CD 까지 <strong>${t.cicd}</strong>, 배포 자동 <strong>${t.deploy_auto}</strong>, AWS 배포 <strong>${t.aws}</strong>. 각 셀은 그 단계가 이 레포에서 자동인지(파랑) · 사람이 하는지(빗금) · 없는지(점선)를 뜻하고, 점은 최근 상태입니다.`;
+      renderBoard($("#wf-board"), b.rows, false);
+    } catch (e) { $("#wf-meta").textContent = `실패: ${e.message}`; }
+  }
+  $("#wf-ci").addEventListener("change", loadWorkflow);
+
+  function renderDelivery(r) {
+    const d = r.delivery || {};
+    $("#r-wf-summary").textContent = d.summary || "";
+    renderBoard($("#r-wf"), [{ name: r.name, eligible: r.eligible, fe_be_ok: r.fe_be_ok, stages: r.workflow || [] }], true);
+    kv("#r-delivery-kv", [
+      ["원격", d.remote_url ? `<a href="${esc(d.remote_web || "#")}" target="_blank" rel="noopener">${esc(d.remote_url)}</a> (${esc(d.remote_host)})` : "없음 → push 단계 없음"],
+      ["origin 동기화", d.sync && d.sync.tracked ? `ahead ${d.sync.ahead} · behind ${d.sync.behind} · origin HEAD ${esc(d.sync.origin_head_date || "")}` : "추적 브랜치 없음(또는 fetch 전)"],
+      ["워크플로", (d.workflows || []).length ? d.workflows.map((w) => `<span class="mono">${esc(w.file)}</span> ${esc(w.name)} <span class="muted">[${esc(w.triggers.join(", "))}]</span> ${w.on_base_push ? badge("기준 브랜치 push 반응", "good") : ""} ${w.deployish ? badge("배포성", "serious") : ""} ${w.targets.length ? `<span class="muted">${esc(w.targets.join(", "))}</span>` : ""}`).join("<br>") : "없음"],
+      ["push 모드", esc(MODE_KO[d.push_mode] || d.push_mode || "-")], ["CI/CD 모드", esc(MODE_KO[d.cicd_mode] || d.cicd_mode || "-")],
+    ]);
+    const ov = d.override || {};
+    kv("#r-deploy-kv", [
+      ["모드", `${esc(MODE_KO[d.deploy_mode] || d.deploy_mode || "-")}${d.aws ? ` ${badge("AWS", "serious")}` : ""}`],
+      ["대상", esc(d.deploy_target || "-")],
+      ["탐지된 흔적", (d.markers || []).length ? d.markers.slice(0, 10).map((m) => `<span class="mono">${esc(m.path)}</span> <span class="muted">(${esc(m.kind)}${m.note ? " · " + esc(m.note) : ""})</span>`).join("<br>") + (d.markers.length > 10 ? `<br><span class="muted">외 ${d.markers.length - 10}</span>` : "") : "없음"],
+      ["fleet.yaml deploy", Object.keys(ov).length ? Object.entries(ov).map(([k, v]) => `${esc(k)}: <span class="mono">${esc(String(v))}</span>`).join("<br>") : `<span class="muted">선언 없음 — repos.${esc(r.name)}.deploy 에 target/trigger/command 를 적으면 fleet 이 push 뒤 배포하거나 웹에서 배포 요청을 보낼 수 있습니다</span>`],
+      ["마지막 fleet 배포", r.last_deploy ? `${r.last_deploy.ok ? badge("성공", "good") : badge("실패", "crit")} ${fmtTs(r.last_deploy.at)} (${esc(r.last_deploy.source || "")})<pre class="doc" style="max-height:160px">${esc(r.last_deploy.detail || "")}</pre>` : "-"],
+    ]);
+    const ci = r.ci;
+    $("#r-ci-runs").innerHTML = ci ? (ci.ok ? `<h3>GitHub Actions 최근 실행 <a href="${esc(ci.web)}" target="_blank" rel="noopener">↗</a></h3>` + (ci.runs.length ? ci.runs.map((x) => `<div class="ci-run">${x.conclusion === "success" ? badge("success", "good") : x.status !== "completed" ? badge(x.status, "") : badge(x.conclusion || "?", "crit")} <a href="${esc(x.url)}" target="_blank" rel="noopener">${esc(x.name)}</a> <span class="muted">${esc(x.event)} · ${esc(x.sha)} · ${fmtTs((x.updated_at || "").replace("Z", "")).slice(0, 16)}</span></div>`).join("") : `<div class="muted">실행 기록 없음</div>`) : `<h3>GitHub Actions</h3><div class="muted">조회 실패: ${esc(ci.error || "")}</div>`) : "";
   }
 
   // ---------- 타임라인 ----------
@@ -531,7 +694,8 @@
   // ---------- 메인 루프 ----------
   async function refresh() {
     try {
-      const [o, st] = await Promise.all([api("/api/overview"), api("/api/stats").catch(() => null)]);
+      const [o, st, wf] = await Promise.all([api("/api/overview"), api("/api/stats").catch(() => null), state.workflowTotals ? Promise.resolve(null) : api("/api/workflow").catch(() => null)]);
+      if (wf) state.workflowTotals = wf.totals;
       state.overview = o; state.stats = st; state.repos = o.repos;
       const serverNow = new Date(String(o.now)).getTime();
       if (isFinite(serverNow)) state.skew = serverNow - Date.now();
@@ -562,5 +726,5 @@
   const hash = location.hash.replace("#", "");
   if (hash.startsWith("repo=")) state.repo = decodeURIComponent(hash.slice(5));
   const initial = hash.startsWith("repo=") ? "repo" : hash;
-  refresh().then(() => showTab(["overview", "repo", "tickets", "timeline", "logs"].includes(initial) ? initial : "overview"));
+  refresh().then(() => showTab(["overview", "workflow", "repo", "tickets", "timeline", "logs"].includes(initial) ? initial : "overview"));
 })();

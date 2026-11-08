@@ -6,6 +6,7 @@ import sys
 import time
 from pathlib import Path
 
+from . import requests as rq
 from .backlog import TicketError, find_ticket, load_tickets, new_ticket
 from .fleet import DaemonOptions, FleetDaemon, ensure_scaffold, load_state
 from .llm import check_endpoint
@@ -205,7 +206,8 @@ def cmd_daemon(args: argparse.Namespace) -> int:
         cfg.active_hours = args.active_hours or None
     if args.merge_at is not None:
         cfg.merge_at = args.merge_at or None
-    opts = DaemonOptions(once=args.once, exit_outside_window=not args.forever, discover=not args.no_discover, max_tickets=args.max_tickets, only=args.only or None)
+    opts = DaemonOptions(once=args.once, exit_outside_window=not args.forever, discover=not args.no_discover, max_tickets=args.max_tickets, only=args.only or None,
+                         on_demand=args.on_demand)
     return FleetDaemon(cfg, opts).run()
 
 
@@ -227,19 +229,39 @@ def cmd_monitor(args: argparse.Namespace) -> int:
     return monitor_main(argv)
 
 
-def cmd_pause(_: argparse.Namespace) -> int:
+def cmd_pause(args: argparse.Namespace) -> int:
+    if getattr(args, "repo", None):
+        rq.set_repo_paused(STATE_DIR, args.repo, True)
+        print(f"✓ {args.repo} paused (이 레포의 새 작업·머지·요청 건너뜀). resume: hermes-fleet resume {args.repo}")
+        return 0
     PAUSE_FILE.parent.mkdir(parents=True, exist_ok=True)
     PAUSE_FILE.write_text(f"paused at {time.strftime('%Y-%m-%d %H:%M:%S')}\n", encoding="utf-8")
     print("✓ paused (진행 중인 티켓은 마친 뒤 대기). resume: hermes-fleet resume")
     return 0
 
 
-def cmd_resume(_: argparse.Namespace) -> int:
+def cmd_resume(args: argparse.Namespace) -> int:
+    if getattr(args, "repo", None):
+        rq.set_repo_paused(STATE_DIR, args.repo, False)
+        print(f"✓ {args.repo} resumed")
+        return 0
     if PAUSE_FILE.exists():
         PAUSE_FILE.unlink()
         print("✓ resumed")
     else:
         print("(not paused)")
+    return 0
+
+
+def cmd_request(args: argparse.Namespace) -> int:
+    if args.list:
+        for r in rq.list_pending(STATE_DIR):
+            print(f"{r['status']:8s} {r['id']}")
+        for r in rq.list_done(STATE_DIR, 10):
+            print(f"{r['status']:8s} {r['id']}  {r.get('detail', '')[:100]}")
+        return 0
+    req = rq.create_request(STATE_DIR, args.repo, args.action, args.ticket, source="cli")
+    print(f"✓ queued {req['id']} — 데몬(또는 on-demand 러너, 최대 2분)이 처리합니다. 바로 실행: hermes-fleet daemon --on-demand")
     return 0
 
 
@@ -294,7 +316,13 @@ def build_parser() -> argparse.ArgumentParser:
     dm.add_argument("--only", nargs="*", help="특정 레포만")
     dm.add_argument("--active-hours", default=None, help='예: "01:00-08:00" (빈 문자열이면 항상)')
     dm.add_argument("--merge-at", default=None, help='예: "07:30" (빈 문자열이면 안 함)')
+    dm.add_argument("--on-demand", action="store_true", help="대기 중인 요청(state/requests)만 처리하고 종료 (시간대 무관, cron 2분 러너)")
     dm.set_defaults(func=cmd_daemon)
+
+    rqp = sub.add_parser("request", help="웹과 같은 요청을 큐에 넣는다: run|discover|merge|approve|retry|stop")
+    rqp.add_argument("repo", nargs="?"); rqp.add_argument("action", nargs="?", choices=list(rq.VALID_ACTIONS)); rqp.add_argument("ticket", nargs="?")
+    rqp.add_argument("--list", action="store_true")
+    rqp.set_defaults(func=cmd_request)
 
     i = sub.add_parser("init", help="레포에 hermes/backlog 스캐폴드 생성")
     i.add_argument("repo", nargs="*"); i.add_argument("--commit", action="store_true")
@@ -303,8 +331,10 @@ def build_parser() -> argparse.ArgumentParser:
     mo.add_argument("--host", default="127.0.0.1"); mo.add_argument("--port", type=int, default=8787)
     mo.add_argument("--reload", action="store_true")
     mo.set_defaults(func=cmd_monitor)
-    sub.add_parser("pause", help="데몬 일시정지").set_defaults(func=cmd_pause)
-    sub.add_parser("resume", help="데몬 재개").set_defaults(func=cmd_resume)
+    pa = sub.add_parser("pause", help="데몬 일시정지 (레포를 주면 그 레포만)")
+    pa.add_argument("repo", nargs="?"); pa.set_defaults(func=cmd_pause)
+    re_ = sub.add_parser("resume", help="데몬 재개 (레포를 주면 그 레포만)")
+    re_.add_argument("repo", nargs="?"); re_.set_defaults(func=cmd_resume)
     return p
 
 

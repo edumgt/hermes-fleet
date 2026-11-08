@@ -10,7 +10,7 @@ project:
     - 새 동작에는 테스트를 추가한다. 저장소 프로필에 적힌 테스트 명령으로 실행 가능해야 한다.
     - 사용자에게 보이는 문구는 한국어, 코드 식별자/로그는 영어.
     - .env, .git, node_modules, 빌드 산출물(dist/target)은 절대 수정하지 않는다.
-    - 프런트엔드 작업은 아래 frontend_guide(표 AG Grid Community · 차트 ApexCharts/TradingView · Tailwind CSS · Pretendard)를 따른다.
+    - 프런트엔드 작업은 아래 frontend_guide(오프캔버스 좌측 햄버거 메뉴 셸 · 표 AG Grid Community · 차트 ApexCharts/TradingView · Tailwind CSS · Pretendard)를 따른다.
 
 # 프런트엔드 기술 가이드 — 디자이너·개발자·QA·Tech Lead 프롬프트에 그대로 주입된다 (모든 레포 공통).
 # 레포별로 바꾸려면 <repo>/hermes/config/org.yaml 에 frontend_guide 를 다시 정의한다 (없으면 이 템플릿 것을 상속, `frontend_guide: false` 면 끈다).
@@ -39,6 +39,14 @@ frontend_guide:
         상호작용 없는 5행 이하의 작은 표는 일반 <table>(Tailwind 클래스) 허용. 다른 그리드 라이브러리(DataTables, Tabulator, Handsontable 등)는 추가하지 않는다.
       npm: "ag-grid-community@34.2.0"
       cdn: "<script src=\"https://cdn.jsdelivr.net/npm/ag-grid-community@34.2.0/dist/ag-grid-community.min.js\"></script>"
+    - area: 레이아웃·내비게이션
+      use: 오프캔버스(offcanvas) 좌측 사이드바 + 햄버거 메뉴 (ChatGPT 화면 방식)
+      rule: >
+        모든 화면은 공통 셸(shell) 안에 둔다. 상단 바 왼쪽에 항상 햄버거 버튼(☰)이 있고, 누르면 좌측에서 오프캔버스 사이드바가 열린다.
+        사이드바가 유일한 1차 메뉴다 — 상단 탭·하단 탭·화면마다 다른 내비게이션을 만들지 않는다. 데스크톱(≥1024px)에서는 사이드바를 열어 둔 채 본문을 밀어내는 push 모드(열림 상태는 localStorage 에 기억),
+        모바일에서는 본문 위로 겹치는 overlay 모드(배경 dim, 바깥 클릭·Esc 로 닫힘). 사이드바 구성: 상단 로고/서비스명, 메뉴 항목(아이콘+라벨, 현재 화면 강조 aria-current="page"), 하단 사용자/설정.
+        라우팅이 없는 정적 HTML 이라도 모든 페이지가 같은 사이드바 마크업을 포함해 메뉴가 항상 같은 자리에 있어야 한다.
+        구현은 Tailwind 유틸리티(translate-x, transition, fixed/sticky)로 하고 별도 UI 프레임워크(Bootstrap offcanvas 등)는 추가하지 않는다. 햄버거 버튼은 aria-controls/aria-expanded 를 갖고 키보드로 열고 닫을 수 있어야 한다.
     - area: 차트
       use: ApexCharts 또는 TradingView Lightweight Charts
       rule: >
@@ -54,6 +62,7 @@ frontend_guide:
   review:
     - "QA 는 추가·수정된 프런트엔드 코드가 이 가이드를 따르는지 diff 로 확인한다. 위반(다른 그리드/차트 라이브러리나 웹폰트 추가, Tailwind 없이 새 CSS 파일 작성, 버전 미고정 CDN)은 결함으로 보고하고 'VERDICT: FAIL' 의 근거가 된다."
     - 디자인 스펙은 표에 AG Grid, 차트에 ApexCharts/Lightweight Charts 중 무엇을 쓰는지와 Tailwind 토큰 매핑을 명시해야 한다.
+    - 새 화면은 반드시 공통 셸(햄버거 버튼 + 오프캔버스 좌측 사이드바) 안에 들어가야 하며, 사이드바에 메뉴 항목이 추가·갱신됐는지 확인한다. 셸 없이 독립 페이지를 만들면 결함이다.
 
 roles:
   pm:

@@ -10,14 +10,14 @@ from .settings import Settings
 from .tools import fs, git, shell
 
 
-def build_tools(root: Path, settings: Settings) -> dict[str, Any]:
+def build_tools(root: Path, settings: Settings, deny: tuple[str, ...] = ()) -> dict[str, Any]:
     from crewai.tools import tool  # noqa: WPS433
 
     @tool("read_file")
     def read_file(path: str, start_line: int = 1, max_lines: int = 400) -> str:
         """Read a text file from the repository with line numbers. Use start_line/max_lines to page through long files. path is relative to the repository root."""
         try:
-            return fs.read_file(path, start_line, max_lines, root=root)
+            return fs.read_file(path, start_line, max_lines, root=root, deny=deny)
         except fs.SandboxError as exc:
             return f"ERROR: {exc}"
 
@@ -25,7 +25,7 @@ def build_tools(root: Path, settings: Settings) -> dict[str, Any]:
     def write_file(path: str, content: str) -> str:
         """Overwrite (or create) a file in the repository with the full new content. Always read_file first and write the COMPLETE file, never a fragment. path is relative to the repository root."""
         try:
-            return fs.write_file(path, content, root=root)
+            return fs.write_file(path, content, root=root, deny=deny)
         except fs.SandboxError as exc:
             return f"ERROR: {exc}"
 
@@ -33,7 +33,7 @@ def build_tools(root: Path, settings: Settings) -> dict[str, Any]:
     def list_dir(path: str = ".", depth: int = 2) -> str:
         """List the repository directory tree (node_modules/.git/dist/target excluded) up to the given depth."""
         try:
-            return fs.list_dir(path, depth, root=root)
+            return fs.list_dir(path, depth, root=root, deny=deny)
         except fs.SandboxError as exc:
             return f"ERROR: {exc}"
 
@@ -41,7 +41,7 @@ def build_tools(root: Path, settings: Settings) -> dict[str, Any]:
     def search_text(pattern: str, path: str = ".", max_results: int = 50) -> str:
         """Search files under path for a regular expression and return 'file:line: text' matches."""
         try:
-            return fs.search_text(pattern, path, max_results, root=root)
+            return fs.search_text(pattern, path, max_results, root=root, deny=deny)
         except fs.SandboxError as exc:
             return f"ERROR: {exc}"
 

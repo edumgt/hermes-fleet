@@ -5,7 +5,7 @@
 #   scripts/monitor.sh restart   재시작(코드 변경 반영: 다시 빌드)
 #   scripts/monitor.sh logs      컨테이너 로그 따라가기
 #   scripts/monitor.sh status    상태·헬스체크
-#   scripts/monitor.sh local     Docker 없이 uv 가상환경으로 실행 (uv sync --extra monitor 필요)
+#   scripts/monitor.sh local     Docker 없이 uv 가상환경으로 실행 (uv sync 필요)
 #   scripts/monitor.sh demo      가짜 fleet(scripts/demo_fleet.py)으로 미리보기 컨테이너 기동 → http://localhost:8790
 #   scripts/monitor.sh demo-down 미리보기 컨테이너 제거
 set -euo pipefail
@@ -50,7 +50,7 @@ case "${1:-up}" in
     ;;
   local)
     shift || true
-    exec uv run --project "$FLEET_DIR" --directory "$FLEET_DIR" --extra monitor python -m hermes_fleet.monitor --host "$BIND" --port "$PORT" "$@"
+    exec uv run --project "$FLEET_DIR" --directory "$FLEET_DIR" python -m hermes_fleet.monitor --host "$BIND" --port "$PORT" "$@"
     ;;
   *)
     echo "usage: $0 {up|down|restart|logs|status|local|demo|demo-down}" >&2

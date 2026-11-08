@@ -15,7 +15,9 @@ hermes-fleet/
 │   ├── discover.py       #   Tech Lead 제안(proposed)
 │   ├── merge.py          #   QA PASS 브랜치 머지 → 프로필 검증 → push
 │   ├── schedule.py       #   01:00-08:00 창, 종료 전 여유
-│   ├── fleetfile.py      #   fleet.yaml include/exclude 편집(웹 모니터의 레포 선택/해제)
+│   ├── fleetfile.py      #   fleet.yaml include/exclude·스케줄 편집(웹 모니터의 레포 선택/스케줄 저장)
+│   ├── requests.py       #   요청 큐(state/requests)와 레포별 일시정지(state/paused) — 웹/CLI 조작을 호스트 데몬이 실행
+│   ├── workflow.py       #   전달 체인 탐지(원격·Actions·배포 흔적) + fleet 배포 실행 + Actions 상태 조회
 │   ├── org.py / agents.py / prompts.py / backlog.py / llm.py / settings.py
 │   ├── tools/            #   레포 루트로 샌드박싱된 fs / shell(허용 목록) / git
 │   └── monitor/          #   웹 모니터(읽기 전용): collect.py(수집) · app.py(FastAPI) · static/(SPA)
@@ -25,7 +27,7 @@ hermes-fleet/
 ├── scripts/demo_fleet.py         # 미리보기용 가짜 fleet 생성
 ├── scripts/install-cron.sh       # 01:00~07:59 10분마다 기동 시도(flock) — WSL 기본
 ├── scripts/install-systemd.sh    # systemd 가 켜진 환경용(선택)
-├── state/   (gitignore)  # fleet.json(커서), <repo>.json(처리 기록·머지 기록), PAUSE, daemon.lock
+├── state/   (gitignore)  # fleet.json(커서), <repo>.json(처리 기록·머지 기록), PAUSE, paused/<repo>, requests/, daemon.lock
 ├── logs/    (gitignore)  # daemon.log
 └── tests/                # pytest (LLM 불필요)
 ```
@@ -50,6 +52,7 @@ hermes-fleet/
 | 07:15~ | 새 작업 시작 안 함(`no_new_work_minutes_before_end: 45`). 진행 중 티켓은 마침 |
 | 07:30 | 레포마다 하루 한 번 **자동 머지**: `git pull --rebase` → `review` 브랜치 `--no-ff` 머지 → 레포 프로필 테스트·빌드 실행 → 통과 시 티켓 `done`, `origin` push, 브랜치 삭제. 충돌/검증 실패는 되돌리고 `review` 로 남김 |
 | 08:00 | 시간대 종료 → 데몬 종료. cron 은 08시대부터 기동하지 않음 |
+| 언제나 | 웹/CLI 요청(`state/requests/`)은 데몬이 매 tick 가장 먼저 처리. 시간대 밖에는 2분 간격 `daemon --on-demand` 러너(같은 flock)가 요청만 처리하고 종료 |
 
 사람이 하는 일은 webrtc-app 과 같습니다: 제안 승인(`approve`), 자동 머지 전 리뷰(막으려면 티켓을 `blocked` 로), blocked 티켓 처리.
 레포가 기준 브랜치가 아닌 다른 브랜치에 있거나 작업 트리가 더러우면 **건드리지 않고 건너뜁니다**(사람이 작업 중인 것으로 간주).
@@ -63,7 +66,7 @@ uv sync --extra dev
 uv run pytest                      # 자체 테스트
 scripts/hermes-fleet check         # 엔드포인트·모델(hermes3:8b, qwen2.5-coder:7b)·설정·대상 레포 점검
 scripts/hermes-fleet repos -v      # 대상 레포와 검증 명령
-scripts/install-cron.sh            # 새벽 자동 실행 등록 (해제: --remove)
+scripts/install-cron.sh            # 새벽 자동 실행 + 2분 간격 on-demand 러너(웹/CLI 요청 처리) 등록 (해제: --remove)
 ```
 
 ## 명령
@@ -77,8 +80,9 @@ scripts/hermes-fleet new <repo> HX-010 "제목"
 scripts/hermes-fleet run <repo> HX-010 [--stages dev,qa] [--commit] [--no-branch]
 scripts/hermes-fleet discover <repo> [--max 2]
 scripts/hermes-fleet merge [repo] [--dry-run] [--no-push]
-scripts/hermes-fleet daemon [--once] [--forever] [--only repo ...] [--active-hours ""] [--no-discover]
-scripts/hermes-fleet pause / resume
+scripts/hermes-fleet daemon [--once] [--forever] [--only repo ...] [--active-hours ""] [--no-discover] [--on-demand]
+scripts/hermes-fleet pause / resume [repo]                # 전체 또는 레포별 일시정지
+scripts/hermes-fleet request <repo> run|discover|merge|approve|retry|stop [HX-nnn]   # 웹과 같은 요청 큐 (--list)
 scripts/hermes-fleet init [repo ...] [--commit]    # hermes/backlog 스캐폴드(데몬이 첫 작업 때 자동 생성하기도 함)
 ```
 
@@ -104,19 +108,37 @@ scripts/monitor.sh local     # Docker 없이: uv sync --extra monitor 후 uv 가
 | 개요 | 데몬 상태(실행 중·대기·응답 없음·미실행·일시정지), 작동 시간대/다음 시작/머지 창, LLM 엔드포인트와 역할별 모델, 현재 처리 중인 티켓·단계. 차트: 티켓 상태 분포(도넛), 레포별 티켓 상태(누적 막대), 최근 14일 QA 결과·머지 건수. **레포 목록 그리드**: root 아래 모든 git 저장소와 선정/제외 사유, 브랜치·작업 트리·검증·티켓·처리 결과·마지막 머지 |
 | 레포 상세 | 레포 목록에서 행을 클릭(또는 드롭다운)하면 그 레포의 **작업 내역**: 티켓별 단계(PM/디자인/개발/QA) 소요 시간, 이 레포의 일별 처리 결과, 처리 기록(state/<repo>.json), 티켓, 자동 머지 기록(merge-report.md), 이 레포의 데몬 로그 |
 | 티켓 | 모든 레포의 백로그를 레포·상태·빠른 검색으로 필터. 티켓을 열면 수용 기준·본문·단계 타임라인(rangeBar)·`git diff --stat`·산출물(prd/design/dev-report/qa-report/summary). 산출물이 `hermes/<ID>` 브랜치에만 있으면 브랜치에서 읽는다(⎇ 표시) |
+| 워크플로 | 레포마다 **발굴 → 승인 → 크루 → 리뷰 → 머지·검증 → GitHub push → CI/CD(Actions) → 배포(AWS…)** 8단계 보드. 각 셀은 그 단계가 이 레포에서 자동인지(파랑) · 사람이 하는지(빗금) · 해당 없는지(점선)를, 점은 최근 상태(티켓 수, 마지막 머지/push, Actions 결과, 배포 결과)를 보여 준다. 레포 상세에도 같은 체인과 원격·워크플로·배포 흔적·Actions 최근 실행이 나온다 |
 | 타임라인 | state/ 의 티켓 처리·merge-report 의 머지·daemon.log 의 ▶/■/✗ 마커를 시간순 그리드로 |
 | 로그 | daemon.log 를 SSE 로 실시간 따라가기, 레포/문자열 필터, `[fleet]/[merge]` 줄만 보기 |
+
+**제어(웹에서 조작)**: 개요의 제어 카드와 레포 목록의 버튼, 레포 상세·티켓 상세의 버튼으로 다음을 할 수 있습니다.
+
+| 조작 | 하는 일 | 반영 |
+|---|---|---|
+| 스케줄 저장 | 작동 시간대·자동 머지 시각·종료 전 여유(분)·폴링 주기를 `fleet.yaml` 에 저장 | 데몬이 돌고 있으면 다음 tick 에 다시 읽음 |
+| 전체 일시정지/재개 | `state/PAUSE` 생성/삭제 | 데몬이 새 작업·요청을 시작하지 않음(진행 중 티켓은 마침) |
+| 레포 ▶ 실행 / 🔍 발굴 / ⇅ 머지 | `state/requests/` 에 요청 파일을 쌓음 | 야간 데몬은 매 tick 요청을 먼저 처리하고, 시간대 밖에는 cron 의 2분 간격 `daemon --on-demand` 러너가 처리 |
+| 레포 ⏹ 중지 / ▶ 재개 | `stop` 요청 + `state/paused/<repo>` 마커 | 진행 중 크루는 다음 단계 경계에서 중단(티켓 blocked, 부분 작업 커밋), 레포는 재개 전까지 건너뜀 |
+| 티켓 ✓ 승인 / ↺ 재시도 준비 / ▶ 이 티켓 실행 | `approve`(proposed→todo) · `retry`(blocked→todo, 기록 삭제) · `run HX-nnn` 요청 | 호스트 러너가 레포에 커밋/실행 |
+
+컨테이너는 다른 레포에 쓸 수 없고 LLM 크루도 없으므로 **모든 조작은 요청 파일로 남고 호스트의 데몬이 실행**합니다. 요청 큐 카드에서 대기·실행 중·최근 결과(done/failed/skipped 와 사유)를 보고 대기 중인 요청은 취소할 수 있습니다.
+요청이 바로 처리되려면 `scripts/install-cron.sh` 로 on-demand 러너 cron 줄이 등록되어 있어야 합니다(없으면 야간 데몬이 처리). 즉시 처리: `scripts/hermes-fleet daemon --on-demand`.
+
+**전개 범위 판단(워크플로 탭)**: 레포의 성격은 자동 탐지합니다 — 원격(`origin`) 이 있으면 push 단계, `.github/workflows` 에 기준 브랜치 push 에 반응하는 워크플로가 있으면 CI/CD 단계, 그 중 이름·잡·내용이 배포성(deploy/cd/release, `aws-actions/*`, ssh→EC2, ECR, S3 sync, SAM/CDK…)이면 "배포(Actions 자동)", 워크플로는 없지만 배포 스크립트·IaC(`deploy/`, `*.sh` 의 `aws s3 sync`, `serverless.yml`, `samconfig.toml`, `cdk.json`, `buildspec.yml`, `terraform/`, `appspec.yml`…)가 있으면 "배포(수동)". AWS 흔적이 있으면 AWS 뱃지가 붙습니다.
+`fleet.yaml` 의 `repos.<name>.deploy` 로 명시할 수도 있습니다: `{target: aws-s3-cloudfront, trigger: actions|fleet|manual|none, command: "aws s3 sync … && aws cloudfront create-invalidation …", cwd: ., note: …}`.
+`trigger: fleet` + `command` 이면 **일일 머지가 push 에 성공한 뒤 fleet 이 그 명령을 실행**해 결과를 state 에 기록하고(merge-report 에도 남음), `command` 가 있으면 웹의 "🚀 배포 요청"(요청 큐 `deploy`)으로도 호스트에서 실행할 수 있습니다. GitHub Actions 상태는 공개 레포는 바로, 비공개 레포는 `.env` 의 `MONITOR_GITHUB_TOKEN`(repo 읽기 권한)으로 조회합니다.
 
 **레포 선택/해제**: 레포 목록의 토글(또는 레포 상세의 스위치)로 fleet 작업 대상을 켜고 끕니다. 이것은 `fleet.yaml` 의 `include`/`exclude` 를 주석을 보존하며 편집하는 것과 같습니다(해제 = `exclude` 에 추가, 선택 = `exclude` 에서 제거하고 `include` 를 쓰는 중이면 거기 추가).
 FE/BE 가 확인되지 않는 저장소는 켜도 대상이 되지 않으므로 토글이 비활성화됩니다. 데몬은 매 tick(폴링 주기) 마다 `fleet.yaml` 변경을 감지해 include/exclude 를 다시 읽으므로, 돌고 있는 중에도 다음 레포 선택부터 반영됩니다(진행 중인 티켓은 마칩니다).
 
 동작 방식과 제약:
 
-- 컨테이너는 호스트 root(`/home/ubuntu`)를 **같은 경로에 읽기 전용**으로 마운트해 fleet.yaml·state/·logs/·각 레포의 git 을 그대로 읽고, `hermes-fleet` 디렉터리만 쓰기 가능으로 겹쳐 마운트합니다(레포 선택이 fleet.yaml 을 고치기 위해). 그 외에는 아무것도 쓰지 않으며 `approve/pause` 같은 조작은 제공하지 않습니다(CLI 사용).
+- 컨테이너는 호스트 root(`/home/ubuntu`)를 **같은 경로에 읽기 전용**으로 마운트해 fleet.yaml·state/·logs/·각 레포의 git 을 그대로 읽고, `hermes-fleet` 디렉터리만 쓰기 가능으로 겹쳐 마운트합니다. 컨테이너가 쓰는 것은 `fleet.yaml`(선택·스케줄), `state/PAUSE`, `state/paused/`, `state/requests/` 뿐입니다.
 - 데몬 실행 판정: `state/daemon.lock` 의 flock 이 잡혀 있으면 확정. Docker Desktop(별도 VM)에서는 호스트의 flock 이 보이지 않으므로 daemon.log 의 `[fleet] start` / `exiting` 마커와 최근 갱신 시각(폴링 주기의 3배, 최소 45분)으로 판단합니다. 종료 마커 없이 로그가 오래 멈추면 "응답 없음", 작동 시간대인데 시작 기록이 없으면 "미실행"으로 표시합니다.
 - LLM 점검은 컨테이너에서 `host.docker.internal:11434`(Windows Ollama)로 나갑니다. 다른 위치면 `.env` 에 `MONITOR_OLLAMA_HOST` 또는 `MONITOR_HERMES_BASE_URL` 을 지정합니다.
 - 설치 위치가 다르면 `FLEET_ROOT`(마운트할 root), `FLEET_DIR`(hermes-fleet 경로), `MONITOR_PORT`, `MONITOR_BIND`(기본 127.0.0.1; LAN 에 열려면 0.0.0.0), `TZ`(기본 Asia/Seoul — 데몬과 같은 시간대여야 시간대 판정이 맞음) 를 환경변수나 `.env` 로 넘깁니다.
-- API: `/api/overview` `/api/stats` `/api/repos` `/api/repos/<repo>` `PUT /api/repos/<repo>/selection` `/api/repos/<repo>/tickets/<ID>` `/api/timeline` `/api/logs` `/api/logs/stream`(SSE), 문서는 `/api/docs`.
+- API: `/api/overview` `/api/stats` `/api/workflow?ci=true` `/api/repos` `/api/repos/<repo>` `PUT /api/repos/<repo>/selection` `/api/repos/<repo>/tickets/<ID>` `/api/timeline` `/api/logs` `/api/logs/stream`(SSE), 문서는 `/api/docs`.
 
 ## 프런트엔드 기술 가이드 (크루 공통 규칙)
 
@@ -127,6 +149,7 @@ PM·디자이너·개발자·QA 프롬프트와 Tech Lead 발굴 프롬프트에
 |---|---|---|
 | CSS | **Tailwind CSS** (v4) | 새 화면은 유틸리티 클래스로. 기존 CSS 변수는 theme 매핑으로 재사용. 정적 HTML 은 `@tailwindcss/browser@4.3.5` Play CDN |
 | 폰트 | **Pretendard** (1.3.9) | `"Pretendard Variable", Pretendard, …` 스택. 다른 웹폰트 추가 금지 |
+| 레이아웃 | **오프캔버스 좌측 사이드바 + 햄버거 메뉴** (ChatGPT 방식) | 모든 화면이 같은 셸 안에. 상단 바 왼쪽 ☰ 버튼이 유일한 1차 메뉴를 연다. 데스크톱은 push(열림 기억), 모바일은 overlay. Tailwind 로 구현, 별도 UI 프레임워크 금지 |
 | 표 | **AG Grid Community** (34.2.0) | 정렬/필터/페이지네이션이 필요한 표. Enterprise 기능 금지, Theming API 사용. 5행 이하 정적 표는 `<table>` 허용 |
 | 차트 | **ApexCharts** (4.7.0) 또는 **TradingView Lightweight Charts** (5.2.1) | 일반 차트는 ApexCharts, 캔들/OHLC/실시간 금융 차트는 Lightweight Charts. Chart.js·Highcharts·ECharts 등 추가 금지 |
 
@@ -141,6 +164,12 @@ PM·디자이너·개발자·QA 프롬프트와 Tech Lead 발굴 프롬프트에
 - 산출물: `<repo>/hermes/workspace/<ID>/` (prd.md, design.md, dev-report.md, qa-report.md, summary.md). 로그·발굴 원문은 gitignore.
 - 조직 오버라이드: `<repo>/hermes/config/org.yaml` (webrtc-app 은 자체 정의 사용).
 - 브랜치 `hermes/<ID>`, 커밋 서명 `Co-Authored-By: Hermes Fleet`.
+
+## hermes-fleet 자신도 크루의 대상
+
+`fleet.yaml` 의 `repos.hermes-fleet` 로 하네스 자신을 대상에 넣었습니다(FE = `hermes_fleet/monitor/static`, BE = `.`, 검증 = `uv run --with pytest python -m pytest -q`).
+크루가 데몬의 상태·설정을 건드리지 못하도록 `deny: [state/, logs/, fleet.yaml, …]` 가 fs 도구 샌드박스에 추가되고, 데몬은 시작 시 자신의 모듈을 모두 적재해 브랜치 전환 중 지연 import 로 깨지지 않게 했습니다.
+주의할 점: 티켓은 `hermes/HX-nnn` 브랜치에서 처리되고 **07:30 자동 머지로 main 에 들어간 코드가 다음 데몬 기동부터 실행**됩니다. 테스트가 통과했더라도 데몬 동작을 바꾸는 변경은 머지 전(`review` 상태)에 `git diff main..hermes/HX-nnn` 으로 확인하고, 막으려면 티켓을 `blocked` 로 바꾸거나 웹에서 레포를 ⏹ 중지하세요. 작업 트리가 더러우면(개발 중) 데몬은 이 레포를 건너뜁니다.
 
 ## 안전장치
 

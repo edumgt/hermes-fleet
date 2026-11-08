@@ -46,6 +46,14 @@ def make_repo(root: Path, name: str, be_dir: str) -> Path:
     (r / be_dir / "requirements.txt").write_text("fastapi\n"); (r / be_dir / "main.py").write_text("def add(a, b):\n    return a + b\n")
     (r / be_dir / "tests").mkdir(); (r / be_dir / "tests" / "test_main.py").write_text("def test_add():\n    assert 1 + 1 == 2\n")
     (r / "hermes").mkdir(); (r / "hermes" / ".gitignore").write_text("workspace/*/logs/\nworkspace/discover/\n")
+    g(r, "remote", "add", "origin", f"https://github.com/demo-org/{name}.git")
+    wf = r / ".github" / "workflows"; wf.mkdir(parents=True)
+    if name in ("shop", "ops-portal"):
+        wf.joinpath("cd.yml").write_text("name: CD — Deploy to EC2\non:\n  push:\n    branches: [main]\njobs:\n  deploy:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: aws-actions/configure-aws-credentials@v4\n      - uses: appleboy/ssh-action@v1\n")
+    if name in ("shop", "blog"):
+        wf.joinpath("ci.yml").write_text("name: CI\non: [push]\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: pytest\n")
+    if name == "blog":
+        (r / "deploy.sh").write_text("aws s3 sync frontend/ s3://blog-site --delete\naws cloudfront create-invalidation --distribution-id E123 --paths '/*'\n")
     (r / "hermes" / "backlog").mkdir(); (r / "hermes" / "backlog" / "README.md").write_text("# Backlog\n")
     commit(r, "initial")
     return r
@@ -103,6 +111,9 @@ poll_seconds: 600
 include: []
 exclude:
   - notes          # 메모용 레포 — 작업 대상 아님
+repos:
+  blog:
+    deploy: {{target: aws-s3-cloudfront, trigger: fleet, command: "echo 'aws s3 sync … (demo)'", note: "push 뒤 fleet 이 S3 동기화 + CloudFront 무효화"}}
 discover:
   max_proposals: 2
   max_open_proposed: 4
@@ -177,6 +188,15 @@ auto_merge:
             f"{tail:%Y-%m-%d %H:%M:%S} [shop][dev] iteration 1 → hermes/workspace/HX-011/dev-report.md"]
     (fleet / "logs" / "daemon.log").write_text("\n".join(log) + "\n")
     (fleet / "state" / "daemon.lock").write_text("")
+    # 제어 상태 예시: 일시정지된 레포, 대기 중/처리된 요청
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+    from hermes_fleet import requests as rq  # noqa: E402
+    rq.set_repo_paused(fleet / "state", "ops-portal", True, "paused from web")
+    rq.create_request(fleet / "state", "shop", "run")
+    rq.create_request(fleet / "state", "blog", "discover")
+    rq.complete(fleet / "state", rq.create_request(fleet / "state", "blog", "merge"), "done", "merged=['HX-001'] pushed=True")
+    rq.complete(fleet / "state", rq.create_request(fleet / "state", "shop", "approve", "HX-010"), "failed", "LLM endpoint unreachable (timed out)")
+    rq.complete(fleet / "state", rq.create_request(fleet / "state", "ops-portal", "run"), "skipped", "repo is paused; resume first")
     print(f"✓ demo fleet: {fleet}  (root: {root})")
 
 

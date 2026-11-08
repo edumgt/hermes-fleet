@@ -18,6 +18,23 @@ from .collect import Collector, parse_log_line
 class Selection(BaseModel):
     selected: bool
 
+
+class Paused(BaseModel):
+    paused: bool
+
+
+class RequestBody(BaseModel):
+    action: str
+    ticket: str | None = None
+
+
+class ScheduleBody(BaseModel):
+    active_hours: str | None = None
+    merge_at: str | None = None
+    no_new_work_minutes_before_end: int | None = None
+    poll_seconds: int | None = None
+    endpoint_retry_seconds: int | None = None
+
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 
 
@@ -53,6 +70,58 @@ def create_app(collector: Collector | None = None) -> FastAPI:
             raise HTTPException(409, str(exc)) from exc
         except FleetFileError as exc:
             raise HTTPException(400, str(exc)) from exc
+
+    @app.put("/api/repos/{name}/pause")
+    def repo_pause(name: str, body: Paused) -> dict[str, Any]:
+        try:
+            return col.set_repo_paused(name, body.paused)
+        except PermissionError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+
+    @app.post("/api/repos/{name}/requests")
+    def repo_request(name: str, body: RequestBody) -> dict[str, Any]:
+        try:
+            return col.create_request(name, body.action, body.ticket)
+        except PermissionError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+
+    @app.get("/api/requests")
+    def requests_list() -> dict[str, Any]:
+        return col.requests()
+
+    @app.delete("/api/requests/{request_id}")
+    def request_cancel(request_id: str) -> dict[str, Any]:
+        try:
+            ok = col.cancel_request(request_id)
+        except PermissionError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        if not ok:
+            raise HTTPException(404, "pending request not found")
+        return {"cancelled": request_id}
+
+    @app.put("/api/pause")
+    def pause_all(body: Paused) -> dict[str, Any]:
+        try:
+            return col.set_paused_all(body.paused)
+        except PermissionError as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+    @app.put("/api/schedule")
+    def schedule(body: ScheduleBody) -> dict[str, Any]:
+        try:
+            return col.update_schedule(body.model_dump())
+        except PermissionError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        except FleetFileError as exc:
+            raise HTTPException(400, str(exc)) from exc
+
+    @app.get("/api/workflow")
+    def workflow(ci: bool = Query(False, description="GitHub Actions 실행 상태도 조회(캐시 2분)")) -> dict[str, Any]:
+        return col.workflow_board(with_ci=ci)
 
     @app.get("/api/stats")
     def stats(days: int = Query(14, ge=1, le=90)) -> dict[str, Any]:

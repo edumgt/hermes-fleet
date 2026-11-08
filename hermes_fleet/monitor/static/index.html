@@ -17,6 +17,7 @@
   </div>
   <nav class="tabs" role="tablist">
     <button class="tab active" data-tab="overview" role="tab">개요</button>
+    <button class="tab" data-tab="workflow" role="tab">워크플로</button>
     <button class="tab" data-tab="repo" role="tab">레포 상세</button>
     <button class="tab" data-tab="tickets" role="tab">티켓</button>
     <button class="tab" data-tab="timeline" role="tab">타임라인</button>
@@ -49,6 +50,29 @@
       </div>
     </div>
 
+    <div class="grid two">
+      <div class="card">
+        <div class="card-head"><h2>제어</h2><span class="muted" id="ctl-note"></span></div>
+        <div class="ctl-row">
+          <button id="ctl-pause-all" class="btn">⏸ 전체 일시정지</button>
+          <span class="muted">일시정지 중에는 데몬이 새 작업·요청을 시작하지 않습니다(진행 중인 티켓은 마칩니다).</span>
+        </div>
+        <form id="sched-form" class="sched">
+          <label>작동 시간대 <input name="active_hours" placeholder="01:00-08:00 (비우면 항상)"></label>
+          <label>자동 머지 시각 <input name="merge_at" placeholder="07:30 (비우면 안 함)"></label>
+          <label>종료 전 새 작업 중단(분) <input name="no_new_work_minutes_before_end" type="number" min="0"></label>
+          <label>폴링 주기(초) <input name="poll_seconds" type="number" min="10"></label>
+          <div class="sched-actions"><button type="submit" class="btn primary">스케줄 저장</button><span class="muted" id="sched-msg">fleet.yaml 에 저장되며 데몬은 다음 tick 에 반영합니다.</span></div>
+        </form>
+      </div>
+      <div class="card">
+        <div class="card-head"><h2>요청 큐</h2><span class="muted">웹/CLI 요청은 호스트 데몬(야간) 또는 2분마다 도는 on-demand 러너가 처리</span></div>
+        <div id="req-pending"></div>
+        <h3>최근 처리</h3>
+        <div id="req-recent"></div>
+      </div>
+    </div>
+
     <div class="card">
       <div class="card-head">
         <h2>레포 목록 <span class="muted" id="repo-count"></span></h2>
@@ -65,6 +89,24 @@
     </div>
   </section>
 
+  <!-- ===== 워크플로 ===== -->
+  <section id="tab-workflow" class="panel">
+    <div class="card">
+      <div class="card-head">
+        <h2>전개 범위 — 레포 성격에 따라 어디까지 자동으로 이어지는가</h2>
+        <span class="muted" id="wf-meta"></span>
+      </div>
+      <div class="wf-legend">
+        <span><i class="lg auto"></i>자동(데몬/Actions)</span><span><i class="lg manual"></i>사람이 하는 단계</span><span><i class="lg none"></i>해당 없음</span>
+        <span class="sep"></span>
+        <span><i class="st ok"></i>정상</span><span><i class="st running"></i>진행 중</span><span><i class="st warn"></i>주의</span><span><i class="st fail"></i>실패/막힘</span>
+        <label class="chk" style="margin-left:auto"><input type="checkbox" id="wf-ci" checked> GitHub Actions 상태 조회</label>
+      </div>
+      <div id="wf-summary" class="wf-summary"></div>
+      <div id="wf-board" class="wf-board"></div>
+    </div>
+  </section>
+
   <!-- ===== 레포 상세 ===== -->
   <section id="tab-repo" class="panel">
     <div class="card">
@@ -74,6 +116,7 @@
           <input type="checkbox" id="r-switch"><span class="slider"></span><span class="switch-label" id="r-switch-label">대상</span>
         </label>
         <span id="r-badges" class="badges"></span>
+        <span class="actions" id="r-actions"></span>
       </div>
       <div id="r-empty" class="empty" hidden>레포를 선택하세요.</div>
       <div id="r-body" hidden>
@@ -81,6 +124,14 @@
       </div>
     </div>
     <div id="r-content" hidden>
+      <div class="card">
+        <div class="card-head"><h2>전달 체인 (워크플로)</h2><span class="muted" id="r-wf-summary"></span></div>
+        <div id="r-wf" class="wf-board single"></div>
+        <div class="grid two" style="margin-top:12px">
+          <div><h3>원격 · CI</h3><dl class="kv" id="r-delivery-kv"></dl></div>
+          <div><h3>배포</h3><dl class="kv" id="r-deploy-kv"></dl><div id="r-ci-runs"></div></div>
+        </div>
+      </div>
       <div class="grid two">
         <div class="card chart-card">
           <div class="card-head"><h2>티켓별 단계 소요 시간</h2><span class="muted">분 · run.jsonl 기준</span></div>

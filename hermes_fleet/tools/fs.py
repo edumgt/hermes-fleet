@@ -14,22 +14,27 @@ class SandboxError(PermissionError):
     pass
 
 
-def resolve_in_repo(path: str, root: Path) -> Path:
+def _denied(rel: str, deny: tuple[str, ...]) -> bool:
+    return any(rel == d.rstrip("/") or rel.startswith(d if d.endswith("/") else d + "/") for d in deny)
+
+
+def resolve_in_repo(path: str, root: Path, deny: tuple[str, ...] = ()) -> Path:
+    """레포 안의 경로로 해석. deny 는 레포별 추가 금지 경로(접두사; 'state/' 처럼 디렉터리는 / 로 끝냄, 파일은 그대로)."""
     candidate = (root / path).resolve() if not Path(path).is_absolute() else Path(path).resolve()
     try:
         rel = candidate.relative_to(root.resolve())
     except ValueError as exc:
         raise SandboxError(f"path escapes repository: {path}") from exc
     rel_str = rel.as_posix()
-    if any(rel_str == p.rstrip("/") or rel_str.startswith(p) for p in DENY_PREFIXES):
+    if any(rel_str == p.rstrip("/") or rel_str.startswith(p if p.endswith("/") else p + "/") or rel_str == p for p in (*DENY_PREFIXES, *deny)):
         raise SandboxError(f"path is denied: {rel_str}")
     if candidate.name in DENY_NAMES or (candidate.name.startswith(".env") and candidate.name != ".env.example"):
         raise SandboxError(f"path is denied: {rel_str}")
     return candidate
 
 
-def read_file(path: str, start_line: int = 1, max_lines: int = 400, root: Path = None) -> str:
-    target = resolve_in_repo(path, root)
+def read_file(path: str, start_line: int = 1, max_lines: int = 400, root: Path = None, deny: tuple[str, ...] = ()) -> str:
+    target = resolve_in_repo(path, root, deny)
     if not target.is_file():
         return f"ERROR: not a file: {path}"
     lines = target.read_text(encoding="utf-8", errors="replace").splitlines()
@@ -42,15 +47,15 @@ def read_file(path: str, start_line: int = 1, max_lines: int = 400, root: Path =
     return (body + footer)[:MAX_READ_CHARS]
 
 
-def write_file(path: str, content: str, root: Path = None) -> str:
-    target = resolve_in_repo(path, root)
+def write_file(path: str, content: str, root: Path = None, deny: tuple[str, ...] = ()) -> str:
+    target = resolve_in_repo(path, root, deny)
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(content, encoding="utf-8")
     return f"OK: wrote {len(content)} chars to {target.relative_to(root.resolve()).as_posix()}"
 
 
-def list_dir(path: str = ".", depth: int = 2, root: Path = None) -> str:
-    base = resolve_in_repo(path, root)
+def list_dir(path: str = ".", depth: int = 2, root: Path = None, deny: tuple[str, ...] = ()) -> str:
+    base = resolve_in_repo(path, root, deny)
     if not base.is_dir():
         return f"ERROR: not a directory: {path}"
     out: list[str] = []
@@ -62,6 +67,8 @@ def list_dir(path: str = ".", depth: int = 2, root: Path = None) -> str:
             if child.name in SKIP_DIRS:
                 continue
             rel = child.relative_to(root.resolve()).as_posix()
+            if _denied(rel, deny):
+                continue
             out.append(f"{'  ' * (level - 1)}{rel}{'/' if child.is_dir() else ''}")
             if child.is_dir():
                 walk(child, level + 1)
@@ -70,8 +77,8 @@ def list_dir(path: str = ".", depth: int = 2, root: Path = None) -> str:
     return "\n".join(out) if out else "(empty)"
 
 
-def search_text(pattern: str, path: str = ".", max_results: int = 50, root: Path = None) -> str:
-    base = resolve_in_repo(path, root)
+def search_text(pattern: str, path: str = ".", max_results: int = 50, root: Path = None, deny: tuple[str, ...] = ()) -> str:
+    base = resolve_in_repo(path, root, deny)
     try:
         regex = re.compile(pattern)
     except re.error as exc:
@@ -79,7 +86,7 @@ def search_text(pattern: str, path: str = ".", max_results: int = 50, root: Path
     results: list[str] = []
     files = [base] if base.is_file() else base.rglob("*")
     for file in files:
-        if not file.is_file() or any(part in SKIP_DIRS for part in file.parts):
+        if not file.is_file() or any(part in SKIP_DIRS for part in file.parts) or _denied(file.relative_to(root.resolve()).as_posix(), deny):
             continue
         if file.suffix in {".png", ".jpg", ".jpeg", ".gif", ".ico", ".woff", ".woff2", ".lock", ".mp4", ".jar", ".class"}:
             continue

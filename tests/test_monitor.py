@@ -305,3 +305,47 @@ def test_stats_and_merge_report_parse(tmp_path: Path, node_python_repo: Path):
     assert len(detail["merge_history"]) == 2 and isinstance(detail["log_lines"], list) and len(detail["daily"]) == 14
     kinds = [e for e in col.timeline(50) if e["kind"] == "merge"]
     assert len(kinds) == 2
+
+
+def test_control_api(tmp_path: Path, node_python_repo: Path):
+    pytest.importorskip("fastapi")
+    from fastapi.testclient import TestClient
+
+    from hermes_fleet import requests as rq
+    from hermes_fleet.monitor.app import create_app
+
+    write_ticket(node_python_repo / "hermes" / "backlog", "HX-001", "add tests", "P1", "backend", ["pm", "dev", "qa"], ["a"], "body", status="proposed")
+    commit_all(node_python_repo, "t")
+    paths = make_fleet(tmp_path, node_python_repo, STOPPED_LOG)
+    client = TestClient(create_app(collector(paths)))
+    o = client.get("/api/overview").json()
+    assert o["control"]["writable"] and o["control"]["pending"] == [] and o["control"]["paused_all"] is False
+
+    r = client.post("/api/repos/shop/requests", json={"action": "approve", "ticket": "hx-001"})
+    assert r.status_code == 200 and r.json()["ticket"] == "HX-001"
+    assert client.post("/api/repos/shop/requests", json={"action": "bogus"}).status_code == 400
+    assert client.post("/api/repos/nope/requests", json={"action": "run"}).status_code == 400
+    q = client.get("/api/requests").json()
+    assert len(q["pending"]) == 1 and q["pending"][0]["action"] == "approve"
+    repo = next(x for x in client.get("/api/overview").json()["repos"] if x["name"] == "shop")
+    assert repo["pending_requests"] == ["approve HX-001"] and repo["paused"] is False
+    assert client.delete(f"/api/requests/{q['pending'][0]['id']}").status_code == 200 and client.get("/api/requests").json()["pending"] == []
+    assert client.delete("/api/requests/nope").status_code == 404
+
+    assert client.put("/api/repos/shop/pause", json={"paused": True}).json()["paused"] is True
+    assert rq.is_repo_paused(paths.state_dir, "shop") and client.get("/api/overview").json()["daemon"]["paused_repos"] == ["shop"]
+    client.put("/api/repos/shop/pause", json={"paused": False})
+    assert client.put("/api/pause", json={"paused": True}).status_code == 200 and paths.pause_file.exists()
+    client.put("/api/pause", json={"paused": False})
+    assert not paths.pause_file.exists()
+
+    r = client.put("/api/schedule", json={"active_hours": "00:30-07:00", "merge_at": "06:45"})
+    assert r.status_code == 200 and r.json()["schedule"]["active_hours"] == "00:30-07:00" and r.json()["schedule"]["merge_at"] == "06:45"
+    assert "00:30-07:00" in paths.config.read_text(encoding="utf-8")
+    assert client.put("/api/schedule", json={"active_hours": "bad"}).status_code == 400
+    assert client.put("/api/schedule", json={}).status_code == 400
+
+    # 제외된 레포에는 run 요청 불가, stop 은 가능
+    client.put("/api/repos/shop/selection", json={"selected": False})
+    assert client.post("/api/repos/shop/requests", json={"action": "run"}).status_code == 400
+    assert client.post("/api/repos/shop/requests", json={"action": "stop"}).status_code == 200

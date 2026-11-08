@@ -233,7 +233,7 @@ def run_discover(profile: RepoProfile, settings: Settings | None = None, max_pro
     org = org or load_org_for(profile)
     existing_titles = [f"{t.id} {t.title} ({t.status})" for t in load_tickets(profile.backlog_dir)]
     llm = build_llm(settings)
-    tools = build_tools(profile.root, settings)
+    tools = build_tools(profile.root, settings, deny=profile.deny)
     agent = build_agent(org.get("discover", {}).get("role", "techlead"), org, llm, tools, settings=settings)
     digest = repo_digest(profile)
     task = Task(description=discover_prompt(org, profile, existing_titles, max_proposals, digest), expected_output="YAML 블록", agent=agent)

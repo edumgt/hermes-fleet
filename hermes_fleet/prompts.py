@@ -81,7 +81,7 @@ def design_task(ticket_text: str, prd_excerpt: str, prd_path: str, profile_text:
 ## PRD (발췌, 전체는 {prd_path})
 {prd_excerpt}
 
-{_profile_block(profile_text)}{_guide_block(frontend_guide, "디자이너 참고: 스펙의 각 컴포넌트에 어떤 가이드 라이브러리(AG Grid / ApexCharts / Lightweight Charts)를 쓰는지, Tailwind 클래스·토큰 매핑, Pretendard 적용 위치를 반드시 적는다.")}
+{_profile_block(profile_text)}{_guide_block(frontend_guide, "디자이너 참고: 모든 화면은 햄버거 버튼 + 오프캔버스 좌측 사이드바 셸 안에 설계한다(사이드바 메뉴 항목 추가/변경을 스펙에 적는다). 각 컴포넌트에 어떤 가이드 라이브러리(AG Grid / ApexCharts / Lightweight Charts)를 쓰는지, Tailwind 클래스·토큰 매핑, Pretendard 적용 위치를 반드시 적는다.")}
 ## 해야 할 일
 1. 프런트엔드 디렉터리의 관련 화면/컴포넌트와 스타일 파일을 읽고 기존 시각 언어(색, 간격, CSS 변수, 컴포넌트 패턴)를 파악한다.
 2. 아래 구조의 디자인 스펙을 작성한다.
@@ -89,7 +89,7 @@ def design_task(ticket_text: str, prd_excerpt: str, prd_path: str, profile_text:
 ```
 # Design Spec: <티켓 ID> <제목>
 ## 1. 사용자 흐름 (단계별, 상태 전이)
-## 2. 화면/컴포넌트 구조 (컴포넌트 트리, props/상태, 신규/수정 구분, 표→AG Grid Community / 차트→ApexCharts 또는 Lightweight Charts 명시)
+## 2. 화면/컴포넌트 구조 (공통 셸: 햄버거 버튼 + 오프캔버스 좌측 사이드바 안에 배치, 사이드바 메뉴 항목 변경 명시 / 컴포넌트 트리, props/상태, 신규/수정 구분, 표→AG Grid Community / 차트→ApexCharts 또는 Lightweight Charts 명시)
 ## 3. 상태별 UI 규칙 (idle / loading / progress / success / error 등)
 ## 4. 스타일 토큰 (Tailwind 클래스와 theme 매핑, 기존 변수 재사용, Pretendard 폰트 적용, 신규는 명시)
 ## 5. 접근성 및 반응형 (aria, 키보드, 모바일 폭)
