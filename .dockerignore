@@ -1,0 +1,14 @@
+.git
+.venv
+.pytest_cache
+__pycache__
+**/__pycache__
+state
+logs
+tests
+uv.lock
+.env
+.env.example
+systemd
+scripts
+.github

@@ -85,15 +85,16 @@ class Pipeline:
         ticket_text = self.ticket.to_prompt()
         profile_text = self.profile.profile_text()
         limit = int(self.org["review_loop"].get("artifact_excerpt_chars", 6000))
+        guide = prompts.render_frontend_guide(self.org.get("frontend_guide"))
         artifacts: dict[str, StageResult] = {}
 
         if "pm" in self.stages:
-            artifacts["pm"] = self._run_stage("pm", 1, prompts.pm_task(ticket_text, self.org["project"], profile_text))
+            artifacts["pm"] = self._run_stage("pm", 1, prompts.pm_task(ticket_text, self.org["project"], profile_text, frontend_guide=guide))
             result.stages.append(artifacts["pm"])
         prd_excerpt, prd_path = self._artifact(artifacts, "pm", limit)
 
         if "design" in self.stages:
-            artifacts["design"] = self._run_stage("design", 1, prompts.design_task(ticket_text, prd_excerpt, prd_path, profile_text))
+            artifacts["design"] = self._run_stage("design", 1, prompts.design_task(ticket_text, prd_excerpt, prd_path, profile_text, frontend_guide=guide))
             result.stages.append(artifacts["design"])
         design_excerpt, design_path = self._artifact(artifacts, "design", limit)
 
@@ -103,11 +104,11 @@ class Pipeline:
             while True:
                 iteration += 1
                 result.iterations = iteration
-                dev = self._run_stage("dev", iteration, prompts.dev_task(ticket_text, prd_excerpt, prd_path, design_excerpt, design_path, qa_feedback, iteration, profile_text))
+                dev = self._run_stage("dev", iteration, prompts.dev_task(ticket_text, prd_excerpt, prd_path, design_excerpt, design_path, qa_feedback, iteration, profile_text, frontend_guide=guide))
                 result.stages.append(dev)
                 if "qa" not in self.stages:
                     break
-                qa = self._run_stage("qa", iteration, prompts.qa_task(ticket_text, prd_excerpt, prd_path, excerpt(dev.text, limit), self._rel(dev.output_path), iteration, profile_text))
+                qa = self._run_stage("qa", iteration, prompts.qa_task(ticket_text, prd_excerpt, prd_path, excerpt(dev.text, limit), self._rel(dev.output_path), iteration, profile_text, frontend_guide=guide))
                 result.stages.append(qa)
                 verdict = self.parse_verdict(qa.text)
                 self.log(f"[qa] iteration {iteration} verdict: {verdict}")
@@ -119,7 +120,7 @@ class Pipeline:
                     break
                 qa_feedback = excerpt(qa.text, limit)
         elif "qa" in self.stages:
-            qa = self._run_stage("qa", 1, prompts.qa_task(ticket_text, prd_excerpt, prd_path, "(개발 단계 없음)", "-", 1, profile_text))
+            qa = self._run_stage("qa", 1, prompts.qa_task(ticket_text, prd_excerpt, prd_path, "(개발 단계 없음)", "-", 1, profile_text, frontend_guide=guide))
             result.stages.append(qa)
             result.passed = self.parse_verdict(qa.text) == "PASS"
 

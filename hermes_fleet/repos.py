@@ -269,12 +269,14 @@ class FleetConfig:
     repos: dict[str, dict[str, Any]] = field(default_factory=dict)
     discover: dict[str, Any] = field(default_factory=lambda: {"max_proposals": 2, "max_open_proposed": 4})
     auto_merge: dict[str, Any] = field(default_factory=lambda: {"verify": True, "require_verification": True, "verify_timeout": 900, "push": True, "delete_merged_branches": True})
+    source: Path | None = None          # 읽어 온 fleet.yaml 경로 (핫리로드용)
+    source_mtime: float | None = None
 
     @classmethod
     def load(cls, path: Path) -> "FleetConfig":
         data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
         root = Path(str(data.get("root") or path.parent.parent)).expanduser()
-        cfg = cls(root=root)
+        cfg = cls(root=root, source=path, source_mtime=path.stat().st_mtime)
         for key in ("active_hours", "no_new_work_minutes_before_end", "merge_at", "poll_seconds", "endpoint_retry_seconds", "include", "exclude"):
             if key in data:
                 setattr(cfg, key, data[key])
@@ -282,6 +284,21 @@ class FleetConfig:
         cfg.discover = {**cfg.discover, **(data.get("discover") or {})}
         cfg.auto_merge = {**cfg.auto_merge, **(data.get("auto_merge") or {})}
         return cfg
+
+    def refresh_selection(self) -> bool:
+        """fleet.yaml 이 바뀌었으면 include/exclude/repos 만 다시 읽는다(데몬이 돌고 있는 동안 레포 선택 변경 반영). 바뀌었으면 True."""
+        if self.source is None:
+            return False
+        try:
+            mtime = self.source.stat().st_mtime
+            if mtime == self.source_mtime:
+                return False
+            fresh = FleetConfig.load(self.source)
+        except (OSError, ValueError, yaml.YAMLError):
+            return False
+        self.include, self.exclude, self.repos = fresh.include, fresh.exclude, fresh.repos
+        self.source_mtime = mtime
+        return True
 
 
 def scan_repos(cfg: FleetConfig) -> list[RepoProfile]:

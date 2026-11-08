@@ -1,0 +1,156 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Hermes Fleet Monitor</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='14' fill='%233987e5'/%3E%3Cpath d='M9 17l5 5 9-11' stroke='white' stroke-width='3.5' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="style.css">
+<script src="https://cdn.jsdelivr.net/npm/ag-grid-community@34.2.0/dist/ag-grid-community.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/apexcharts@4.7.0/dist/apexcharts.min.js"></script>
+</head>
+<body>
+<header class="top">
+  <div class="brand">
+    <span class="dot" id="daemon-dot"></span>
+    <h1>Hermes Fleet <span class="muted">Monitor</span></h1>
+  </div>
+  <nav class="tabs" role="tablist">
+    <button class="tab active" data-tab="overview" role="tab">개요</button>
+    <button class="tab" data-tab="repo" role="tab">레포 상세</button>
+    <button class="tab" data-tab="tickets" role="tab">티켓</button>
+    <button class="tab" data-tab="timeline" role="tab">타임라인</button>
+    <button class="tab" data-tab="logs" role="tab">로그</button>
+  </nav>
+  <div class="top-right">
+    <span id="clock" class="mono muted"></span>
+    <button id="refresh" class="ghost" title="지금 새로고침">↻</button>
+    <span id="conn" class="pill" title="자동 갱신 상태">연결 중</span>
+  </div>
+</header>
+
+<main>
+  <!-- ===== 개요 ===== -->
+  <section id="tab-overview" class="panel active">
+    <div class="tiles" id="tiles"></div>
+
+    <div class="grid three">
+      <div class="card chart-card">
+        <div class="card-head"><h2>티켓 상태 분포</h2><span class="muted" id="totals-sum"></span></div>
+        <div class="chart" id="ch-status"></div>
+      </div>
+      <div class="card chart-card">
+        <div class="card-head"><h2>레포별 티켓 상태</h2><span class="muted">대상 레포</span></div>
+        <div class="chart" id="ch-repos"></div>
+      </div>
+      <div class="card chart-card">
+        <div class="card-head"><h2>최근 14일 처리 결과</h2><span class="muted">QA 결과 · 머지 건수</span></div>
+        <div class="chart" id="ch-daily"></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-head">
+        <h2>레포 목록 <span class="muted" id="repo-count"></span></h2>
+        <span class="muted" id="repo-note">체크 = fleet 작업 대상(fleet.yaml include/exclude). 행을 클릭하면 작업 내역을 봅니다.</span>
+      </div>
+      <div id="grid-repos" class="grid-box auto"></div>
+    </div>
+
+    <div class="grid two">
+      <div class="card"><h2>스케줄</h2><dl class="kv" id="schedule-kv"></dl></div>
+      <div class="card"><h2>현재 작업</h2><div id="activity"></div></div>
+      <div class="card"><h2>LLM 엔드포인트</h2><dl class="kv" id="llm-kv"></dl></div>
+      <div class="card"><h2>설정</h2><dl class="kv" id="cfg-kv"></dl></div>
+    </div>
+  </section>
+
+  <!-- ===== 레포 상세 ===== -->
+  <section id="tab-repo" class="panel">
+    <div class="card">
+      <div class="toolbar">
+        <select id="r-select"></select>
+        <label class="switch" id="r-switch-wrap" title="fleet 작업 대상 선택/해제">
+          <input type="checkbox" id="r-switch"><span class="slider"></span><span class="switch-label" id="r-switch-label">대상</span>
+        </label>
+        <span id="r-badges" class="badges"></span>
+      </div>
+      <div id="r-empty" class="empty" hidden>레포를 선택하세요.</div>
+      <div id="r-body" hidden>
+        <dl class="kv" id="r-kv"></dl>
+      </div>
+    </div>
+    <div id="r-content" hidden>
+      <div class="grid two">
+        <div class="card chart-card">
+          <div class="card-head"><h2>티켓별 단계 소요 시간</h2><span class="muted">분 · run.jsonl 기준</span></div>
+          <div class="chart" id="ch-r-stages"></div>
+        </div>
+        <div class="card chart-card">
+          <div class="card-head"><h2>최근 14일 처리 결과</h2><span class="muted">이 레포</span></div>
+          <div class="chart" id="ch-r-daily"></div>
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-head"><h2>처리 기록 <span class="muted" id="r-hist-count"></span></h2><span class="muted">state/&lt;repo&gt;.json · 클릭하면 티켓 상세</span></div>
+        <div id="grid-history" class="grid-box auto"></div>
+      </div>
+      <div class="card">
+        <div class="card-head"><h2>티켓 <span class="muted" id="r-ticket-count"></span></h2><span class="muted" id="r-ticket-note"></span></div>
+        <div id="grid-r-tickets" class="grid-box auto"></div>
+      </div>
+      <div class="card">
+        <div class="card-head"><h2>자동 머지 기록 <span class="muted" id="r-merge-count"></span></h2><span class="muted">hermes/workspace/merge-report.md</span></div>
+        <div id="grid-merges" class="grid-box auto"></div>
+      </div>
+      <div class="card">
+        <div class="card-head"><h2>이 레포의 데몬 로그</h2><span class="muted">최근 200줄</span></div>
+        <pre class="log small" id="r-log"></pre>
+      </div>
+    </div>
+  </section>
+
+  <!-- ===== 티켓 ===== -->
+  <section id="tab-tickets" class="panel">
+    <div class="card">
+      <div class="filters">
+        <select id="t-repo"><option value="">모든 레포</option></select>
+        <select id="t-status">
+          <option value="">모든 상태</option>
+          <option>proposed</option><option>todo</option><option>in-progress</option><option>review</option><option>done</option><option>blocked</option>
+        </select>
+        <input id="t-q" type="search" placeholder="빠른 검색 (ID / 제목 / 영역)">
+        <span class="muted" id="t-count"></span>
+      </div>
+      <div id="grid-tickets" class="grid-box tall"></div>
+    </div>
+    <div class="card" id="ticket-detail" hidden></div>
+  </section>
+
+  <!-- ===== 타임라인 ===== -->
+  <section id="tab-timeline" class="panel">
+    <div class="card">
+      <div class="card-head"><h2>최근 활동</h2><span class="muted">state/ 기록 + merge-report + daemon.log 마커 · 티켓 행을 클릭하면 상세</span></div>
+      <div id="grid-timeline" class="grid-box tall"></div>
+    </div>
+  </section>
+
+  <!-- ===== 로그 ===== -->
+  <section id="tab-logs" class="panel">
+    <div class="card log-card">
+      <div class="filters">
+        <select id="l-repo"><option value="">모든 레포</option></select>
+        <input id="l-q" type="search" placeholder="필터 (부분 문자열)">
+        <label class="chk"><input type="checkbox" id="l-follow" checked> 따라가기</label>
+        <label class="chk"><input type="checkbox" id="l-fleet-only"> [fleet]/[merge] 줄만</label>
+        <span class="muted" id="l-meta"></span>
+      </div>
+      <pre class="log" id="log"></pre>
+    </div>
+  </section>
+</main>
+
+<div id="toast" class="toast" hidden></div>
+<script src="app.js"></script>
+</body>
+</html>

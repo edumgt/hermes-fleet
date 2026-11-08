@@ -10,6 +10,50 @@ project:
     - 새 동작에는 테스트를 추가한다. 저장소 프로필에 적힌 테스트 명령으로 실행 가능해야 한다.
     - 사용자에게 보이는 문구는 한국어, 코드 식별자/로그는 영어.
     - .env, .git, node_modules, 빌드 산출물(dist/target)은 절대 수정하지 않는다.
+    - 프런트엔드 작업은 아래 frontend_guide(표 AG Grid Community · 차트 ApexCharts/TradingView · Tailwind CSS · Pretendard)를 따른다.
+
+# 프런트엔드 기술 가이드 — 디자이너·개발자·QA·Tech Lead 프롬프트에 그대로 주입된다 (모든 레포 공통).
+# 레포별로 바꾸려면 <repo>/hermes/config/org.yaml 에 frontend_guide 를 다시 정의한다 (없으면 이 템플릿 것을 상속, `frontend_guide: false` 면 끈다).
+frontend_guide:
+  title: 프런트엔드 기술 가이드 (모든 레포 공통 — 반드시 따른다)
+  stack:
+    - area: CSS
+      use: Tailwind CSS
+      rule: >
+        새 화면·컴포넌트의 스타일은 Tailwind 유틸리티 클래스로 쓴다. 별도 CSS 파일/인라인 style 은 Tailwind 로 표현할 수 없을 때만 최소한으로.
+        기존 CSS 변수(색·간격·반경)는 tailwind 설정(theme.extend) 또는 @theme 으로 매핑해 재사용하고 색상 값을 새로 발명하지 않는다.
+      npm: "tailwindcss@4 (+ @tailwindcss/vite 또는 @tailwindcss/postcss)"
+      cdn: "<script src=\"https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4.3.5\"></script>  (정적 HTML 레포 전용 Play CDN)"
+    - area: 폰트
+      use: Pretendard
+      rule: >
+        본문·UI 글꼴은 Pretendard Variable. font-family 는 "Pretendard Variable", Pretendard, -apple-system, BlinkMacSystemFont, system-ui, Roboto, "Helvetica Neue", "Segoe UI", "Apple SD Gothic Neo", "Noto Sans KR", sans-serif 순.
+        Tailwind 를 쓰면 fontFamily.sans(또는 --font-sans)를 이 값으로 둔다. 코드/로그 영역만 모노스페이스 허용. 다른 웹폰트(Noto Sans 웹폰트 로드 등)는 추가하지 않는다.
+      cdn: "<link rel=\"stylesheet\" href=\"https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/variable/pretendardvariable-dynamic-subset.min.css\">"
+      npm: "pretendard@1.3.9"
+    - area: 표
+      use: AG Grid Community
+      rule: >
+        정렬·필터·페이지네이션·대량 행이 필요한 데이터 표는 AG Grid Community(ag-grid-community, MIT)로 만든다.
+        Enterprise 전용 기능(행 그룹핑/피벗/사이드바/Excel export/ag-grid-enterprise 패키지)은 쓰지 않는다. Theming API(themeQuartz, 다크 모드는 colorSchemeDark)를 쓰고 레거시 CSS 테마 파일은 넣지 않는다.
+        상호작용 없는 5행 이하의 작은 표는 일반 <table>(Tailwind 클래스) 허용. 다른 그리드 라이브러리(DataTables, Tabulator, Handsontable 등)는 추가하지 않는다.
+      npm: "ag-grid-community@34.2.0"
+      cdn: "<script src=\"https://cdn.jsdelivr.net/npm/ag-grid-community@34.2.0/dist/ag-grid-community.min.js\"></script>"
+    - area: 차트
+      use: ApexCharts 또는 TradingView Lightweight Charts
+      rule: >
+        일반 차트(막대·선·영역·도넛·히트맵·레이더 등)는 ApexCharts. 시계열 금융 차트(캔들스틱·OHLC·거래량·실시간 틱 스트리밍)는 TradingView Lightweight Charts(Apache-2.0).
+        Chart.js, Highcharts, ECharts, D3 로 직접 그리기 등 다른 차트 라이브러리는 추가하지 않는다. 이중 y축 금지, 시리즈가 2개 이상이면 범례 필수, 상태 색(성공/경고/오류)은 범주 색과 섞어 쓰지 않는다.
+      npm: "apexcharts@4.7.0 · lightweight-charts@5.2.1"
+      cdn: "<script src=\"https://cdn.jsdelivr.net/npm/apexcharts@4.7.0/dist/apexcharts.min.js\"></script> · <script src=\"https://cdn.jsdelivr.net/npm/lightweight-charts@5.2.1/dist/lightweight-charts.standalone.production.js\"></script>"
+  loading:
+    - 빌드 도구(vite/webpack/next 등)가 있는 레포는 npm 의존성으로 추가하고 package.json 과 lock 파일을 함께 갱신한다.
+    - 정적 HTML 레포는 위 CDN 을 정확한 버전으로 고정해 <head> 에 넣는다. latest 태그·버전 없는 URL 은 금지.
+    - 같은 목적의 다른 라이브러리를 이미 쓰고 있으면 티켓 범위 안의 새 화면에만 가이드를 적용하고, 전면 교체는 별도 티켓으로 제안한다(Tech Lead).
+    - 가이드 라이브러리는 CDN 로드 실패 시에도 페이지가 깨지지 않게 로드 여부를 확인하고 안내 문구를 보여 준다.
+  review:
+    - "QA 는 추가·수정된 프런트엔드 코드가 이 가이드를 따르는지 diff 로 확인한다. 위반(다른 그리드/차트 라이브러리나 웹폰트 추가, Tailwind 없이 새 CSS 파일 작성, 버전 미고정 CDN)은 결함으로 보고하고 'VERDICT: FAIL' 의 근거가 된다."
+    - 디자인 스펙은 표에 AG Grid, 차트에 ApexCharts/Lightweight Charts 중 무엇을 쓰는지와 Tailwind 토큰 매핑을 명시해야 한다.
 
 roles:
   pm:

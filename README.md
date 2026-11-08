@@ -15,9 +15,14 @@ hermes-fleet/
 │   ├── discover.py       #   Tech Lead 제안(proposed)
 │   ├── merge.py          #   QA PASS 브랜치 머지 → 프로필 검증 → push
 │   ├── schedule.py       #   01:00-08:00 창, 종료 전 여유
+│   ├── fleetfile.py      #   fleet.yaml include/exclude 편집(웹 모니터의 레포 선택/해제)
 │   ├── org.py / agents.py / prompts.py / backlog.py / llm.py / settings.py
-│   └── tools/            #   레포 루트로 샌드박싱된 fs / shell(허용 목록) / git
+│   ├── tools/            #   레포 루트로 샌드박싱된 fs / shell(허용 목록) / git
+│   └── monitor/          #   웹 모니터(읽기 전용): collect.py(수집) · app.py(FastAPI) · static/(SPA)
+├── docker-compose.yml / docker/monitor.Dockerfile   # 웹 모니터 컨테이너
 ├── scripts/hermes-fleet          # CLI 래퍼 (uv)
+├── scripts/monitor.sh            # 웹 모니터 up/down/logs/status/local/demo
+├── scripts/demo_fleet.py         # 미리보기용 가짜 fleet 생성
 ├── scripts/install-cron.sh       # 01:00~07:59 10분마다 기동 시도(flock) — WSL 기본
 ├── scripts/install-systemd.sh    # systemd 가 켜진 환경용(선택)
 ├── state/   (gitignore)  # fleet.json(커서), <repo>.json(처리 기록·머지 기록), PAUSE, daemon.lock
@@ -78,6 +83,57 @@ scripts/hermes-fleet init [repo ...] [--commit]    # hermes/backlog 스캐폴드
 ```
 
 `daemon` 은 기본(cron 모드)에서 시간대 밖이면 종료합니다. systemd 로 상시 실행하려면 `--forever`(유닛에 포함).
+
+## 웹 모니터 (Docker)
+
+데몬이 무엇을 하고 있는지 브라우저로 보는 대시보드입니다. 하네스 코드와 같은 저장소에 있고, Docker 로 띄웁니다.
+표는 **AG Grid Community**, 차트는 **ApexCharts**(둘 다 jsDelivr CDN, 버전 고정)로 그립니다.
+
+```bash
+scripts/monitor.sh up        # 빌드 + 기동 → http://localhost:8787  (Windows 브라우저에서도 열림)
+scripts/monitor.sh status    # 컨테이너 상태 + /api/health
+scripts/monitor.sh logs      # 컨테이너 로그
+scripts/monitor.sh restart   # 코드 수정 반영(다시 빌드)
+scripts/monitor.sh down
+scripts/monitor.sh demo      # 가짜 fleet 으로 미리보기(포트 8790) — 첫 실행 전에 화면을 보고 싶을 때. 해제: demo-down
+scripts/monitor.sh local     # Docker 없이: uv sync --extra monitor 후 uv 가상환경으로 실행 (= hermes-fleet monitor)
+```
+
+| 탭 | 보여 주는 것 |
+|---|---|
+| 개요 | 데몬 상태(실행 중·대기·응답 없음·미실행·일시정지), 작동 시간대/다음 시작/머지 창, LLM 엔드포인트와 역할별 모델, 현재 처리 중인 티켓·단계. 차트: 티켓 상태 분포(도넛), 레포별 티켓 상태(누적 막대), 최근 14일 QA 결과·머지 건수. **레포 목록 그리드**: root 아래 모든 git 저장소와 선정/제외 사유, 브랜치·작업 트리·검증·티켓·처리 결과·마지막 머지 |
+| 레포 상세 | 레포 목록에서 행을 클릭(또는 드롭다운)하면 그 레포의 **작업 내역**: 티켓별 단계(PM/디자인/개발/QA) 소요 시간, 이 레포의 일별 처리 결과, 처리 기록(state/<repo>.json), 티켓, 자동 머지 기록(merge-report.md), 이 레포의 데몬 로그 |
+| 티켓 | 모든 레포의 백로그를 레포·상태·빠른 검색으로 필터. 티켓을 열면 수용 기준·본문·단계 타임라인(rangeBar)·`git diff --stat`·산출물(prd/design/dev-report/qa-report/summary). 산출물이 `hermes/<ID>` 브랜치에만 있으면 브랜치에서 읽는다(⎇ 표시) |
+| 타임라인 | state/ 의 티켓 처리·merge-report 의 머지·daemon.log 의 ▶/■/✗ 마커를 시간순 그리드로 |
+| 로그 | daemon.log 를 SSE 로 실시간 따라가기, 레포/문자열 필터, `[fleet]/[merge]` 줄만 보기 |
+
+**레포 선택/해제**: 레포 목록의 토글(또는 레포 상세의 스위치)로 fleet 작업 대상을 켜고 끕니다. 이것은 `fleet.yaml` 의 `include`/`exclude` 를 주석을 보존하며 편집하는 것과 같습니다(해제 = `exclude` 에 추가, 선택 = `exclude` 에서 제거하고 `include` 를 쓰는 중이면 거기 추가).
+FE/BE 가 확인되지 않는 저장소는 켜도 대상이 되지 않으므로 토글이 비활성화됩니다. 데몬은 매 tick(폴링 주기) 마다 `fleet.yaml` 변경을 감지해 include/exclude 를 다시 읽으므로, 돌고 있는 중에도 다음 레포 선택부터 반영됩니다(진행 중인 티켓은 마칩니다).
+
+동작 방식과 제약:
+
+- 컨테이너는 호스트 root(`/home/ubuntu`)를 **같은 경로에 읽기 전용**으로 마운트해 fleet.yaml·state/·logs/·각 레포의 git 을 그대로 읽고, `hermes-fleet` 디렉터리만 쓰기 가능으로 겹쳐 마운트합니다(레포 선택이 fleet.yaml 을 고치기 위해). 그 외에는 아무것도 쓰지 않으며 `approve/pause` 같은 조작은 제공하지 않습니다(CLI 사용).
+- 데몬 실행 판정: `state/daemon.lock` 의 flock 이 잡혀 있으면 확정. Docker Desktop(별도 VM)에서는 호스트의 flock 이 보이지 않으므로 daemon.log 의 `[fleet] start` / `exiting` 마커와 최근 갱신 시각(폴링 주기의 3배, 최소 45분)으로 판단합니다. 종료 마커 없이 로그가 오래 멈추면 "응답 없음", 작동 시간대인데 시작 기록이 없으면 "미실행"으로 표시합니다.
+- LLM 점검은 컨테이너에서 `host.docker.internal:11434`(Windows Ollama)로 나갑니다. 다른 위치면 `.env` 에 `MONITOR_OLLAMA_HOST` 또는 `MONITOR_HERMES_BASE_URL` 을 지정합니다.
+- 설치 위치가 다르면 `FLEET_ROOT`(마운트할 root), `FLEET_DIR`(hermes-fleet 경로), `MONITOR_PORT`, `MONITOR_BIND`(기본 127.0.0.1; LAN 에 열려면 0.0.0.0), `TZ`(기본 Asia/Seoul — 데몬과 같은 시간대여야 시간대 판정이 맞음) 를 환경변수나 `.env` 로 넘깁니다.
+- API: `/api/overview` `/api/stats` `/api/repos` `/api/repos/<repo>` `PUT /api/repos/<repo>/selection` `/api/repos/<repo>/tickets/<ID>` `/api/timeline` `/api/logs` `/api/logs/stream`(SSE), 문서는 `/api/docs`.
+
+## 프런트엔드 기술 가이드 (크루 공통 규칙)
+
+크루가 다른 레포의 프런트엔드를 만들거나 고칠 때 따르는 기술 스택은 [templates/org.yaml](templates/org.yaml) 의 `frontend_guide` 에 정의되어 있고,
+PM·디자이너·개발자·QA 프롬프트와 Tech Lead 발굴 프롬프트에 **그대로 주입**됩니다(`hermes_fleet/prompts.py` 의 `render_frontend_guide`).
+
+| 영역 | 사용 | 요지 |
+|---|---|---|
+| CSS | **Tailwind CSS** (v4) | 새 화면은 유틸리티 클래스로. 기존 CSS 변수는 theme 매핑으로 재사용. 정적 HTML 은 `@tailwindcss/browser@4.3.5` Play CDN |
+| 폰트 | **Pretendard** (1.3.9) | `"Pretendard Variable", Pretendard, …` 스택. 다른 웹폰트 추가 금지 |
+| 표 | **AG Grid Community** (34.2.0) | 정렬/필터/페이지네이션이 필요한 표. Enterprise 기능 금지, Theming API 사용. 5행 이하 정적 표는 `<table>` 허용 |
+| 차트 | **ApexCharts** (4.7.0) 또는 **TradingView Lightweight Charts** (5.2.1) | 일반 차트는 ApexCharts, 캔들/OHLC/실시간 금융 차트는 Lightweight Charts. Chart.js·Highcharts·ECharts 등 추가 금지 |
+
+- 도입 방식: 빌드 도구가 있으면 npm(+lock 갱신), 정적 HTML 이면 버전을 고정한 jsDelivr CDN. `latest` 금지.
+- 디자이너는 스펙에 컴포넌트별 라이브러리와 Tailwind 토큰 매핑, 의존성(7절)을 명시하고, QA 는 FE diff 의 가이드 준수를 `FE-GUIDE` 행으로 검증해 위반 시 FAIL 사유로 삼습니다. Tech Lead 는 가이드와 어긋난 기존 화면을 작은 마이그레이션 티켓으로 제안할 수 있습니다.
+- 바꾸려면 `templates/org.yaml` 의 `frontend_guide` 를 수정합니다(버전 올리기, 항목 추가). 레포별로 다르게 하려면 `<repo>/hermes/config/org.yaml` 에 `frontend_guide` 를 다시 정의하고, 끄려면 `frontend_guide: false` 를 둡니다(정의가 없으면 템플릿 것을 상속).
+- 웹 모니터의 개요 > 설정 카드에서 현재 적용 중인 가이드 요약을 볼 수 있습니다.
 
 ## 레포 안의 규약 (webrtc-app 과 동일)
 

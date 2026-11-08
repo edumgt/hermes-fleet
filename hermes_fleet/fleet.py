@@ -194,6 +194,8 @@ class FleetDaemon:
 
     # ---------- 레포 선택/전제 ----------
     def _targets(self) -> list[RepoProfile]:
+        if self.cfg.refresh_selection():
+            self.log(f"[fleet] fleet.yaml changed; include={self.cfg.include} exclude={self.cfg.exclude}")
         profiles = self.repos(self.cfg)
         if self.options.only:
             profiles = [p for p in profiles if p.name in self.options.only]

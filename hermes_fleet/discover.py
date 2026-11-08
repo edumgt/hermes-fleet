@@ -10,6 +10,7 @@ import yaml
 
 from .agents import build_agent, build_tools
 from .backlog import VALID_AREA, VALID_PRIORITY, VALID_STAGES, TicketError, load_tickets, next_ticket_id, write_ticket
+from .prompts import render_frontend_guide
 from .llm import build_llm
 from .org import load_org_for
 from .repos import RepoProfile
@@ -106,6 +107,9 @@ def discover_prompt(org: dict[str, Any], profile: RepoProfile, existing_titles: 
     conventions = "\n".join(f"- {c}" for c in org["project"].get("conventions", []))
     existing = "\n".join(f"- {t}" for t in existing_titles) or "- (없음)"
     areas = "|".join(VALID_AREA)
+    guide = render_frontend_guide(org.get("frontend_guide"))
+    guide_block = (f"\n{guide}\nTech Lead 참고: 기존 프런트엔드가 이 가이드와 어긋나면(다른 그리드/차트 라이브러리, 웹폰트 미적용, Tailwind 미사용 화면) "
+                   "하루 안에 끝나는 작은 마이그레이션 티켓(화면 하나 단위)으로 제안할 수 있다. 근거 파일을 인용한다.\n") if guide else ""
     return f"""
 당신은 '{org['project']['name']}' 프로젝트의 Tech Lead입니다. 저장소를 분석해 다음에 처리할 개선 티켓을 제안하세요.
 
@@ -117,7 +121,7 @@ def discover_prompt(org: dict[str, Any], profile: RepoProfile, existing_titles: 
 
 ## 규약
 {conventions}
-
+{guide_block}
 ## 저장소 분석 자료 (자동 생성)
 {digest or "(없음)"}
 

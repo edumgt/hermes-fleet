@@ -29,6 +29,10 @@ def load_org_for(profile: RepoProfile, template_path: Path = TEMPLATE_ORG) -> di
     if override.exists():
         org = _validate(yaml.safe_load(override.read_text(encoding="utf-8")), override)
         org.setdefault("project", {}).setdefault("name", profile.name)
+        if "frontend_guide" not in org:          # 레포 org 가 가이드를 안 적으면 fleet 템플릿 것을 상속
+            org["frontend_guide"] = load_template(template_path).get("frontend_guide")
+        elif not org["frontend_guide"]:          # frontend_guide: false → 이 레포는 가이드 없음
+            org["frontend_guide"] = None
         org["_source"] = str(override)
         return org
     org = load_template(template_path)

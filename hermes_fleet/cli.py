@@ -220,6 +220,13 @@ def cmd_init(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_monitor(args: argparse.Namespace) -> int:
+    from .monitor.__main__ import main as monitor_main  # noqa: WPS433
+
+    argv = ["--host", args.host, "--port", str(args.port)] + (["--reload"] if args.reload else [])
+    return monitor_main(argv)
+
+
 def cmd_pause(_: argparse.Namespace) -> int:
     PAUSE_FILE.parent.mkdir(parents=True, exist_ok=True)
     PAUSE_FILE.write_text(f"paused at {time.strftime('%Y-%m-%d %H:%M:%S')}\n", encoding="utf-8")
@@ -292,6 +299,10 @@ def build_parser() -> argparse.ArgumentParser:
     i = sub.add_parser("init", help="레포에 hermes/backlog 스캐폴드 생성")
     i.add_argument("repo", nargs="*"); i.add_argument("--commit", action="store_true")
     i.set_defaults(func=cmd_init)
+    mo = sub.add_parser("monitor", help="웹 모니터(읽기 전용) 실행 — uv sync --extra monitor 또는 docker compose up")
+    mo.add_argument("--host", default="127.0.0.1"); mo.add_argument("--port", type=int, default=8787)
+    mo.add_argument("--reload", action="store_true")
+    mo.set_defaults(func=cmd_monitor)
     sub.add_parser("pause", help="데몬 일시정지").set_defaults(func=cmd_pause)
     sub.add_parser("resume", help="데몬 재개").set_defaults(func=cmd_resume)
     return p
