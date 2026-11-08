@@ -6,6 +6,8 @@
 # fleet.yaml 의 root, state/, logs/, 각 레포의 hermes/backlog·workspace·.git 을 그대로 읽기 위해 경로를 바꾸지 않는다.
 # hermes-fleet 디렉터리만 쓰기 가능으로 겹쳐 마운트한다 — 웹에서 레포 선택/해제가 fleet.yaml 의 include/exclude 를 고치기 위해서다.
 # 이 폴더에서 `docker compose up -d` 만 실행해도 된다: FLEET_DIR 기본값은 현재 폴더($PWD), FLEET_ROOT 기본값은 그 상위 폴더($PWD/..).
+# 주의: ${PWD} 는 compose 를 실행한 셸의 현재 폴더다. 다른 폴더에서 `docker compose -f .../docker-compose.yml up` 하면 경로가 어긋나므로
+#       그때는 FLEET_DIR=/path/to/hermes-fleet 을 함께 넘기거나 scripts/monitor.sh up 을 쓴다 (엔트리포인트가 하위 폴더에서 hermes-fleet 을 찾아 보정은 한다).
 # fleet.yaml 이 없으면(받은 직후) 모니터 컨테이너가 상위 폴더를 읽어 자동 init(fleet.yaml/.env 생성) 한다. 이미 있으면 그대로 쓴다.
 services:
   monitor:

@@ -4,6 +4,22 @@
 #   HERMES_INIT_ARGS="..."     init 에 넘길 추가 인자 (예: --provider openai --base-url http://host.docker.internal:1234/v1 --model qwen2.5-coder:7b --include a,b)
 set -eu
 FLEET_DIR="${HERMES_FLEET_DIR:?HERMES_FLEET_DIR 가 필요합니다}"
+HERMES_FLEET_DIR_ORIG="$FLEET_DIR"
+# 보정: compose 의 ${PWD} 가 hermes-fleet 이 아닌 다른 폴더(예: 상위 폴더에서 `docker compose -f hermes-fleet/docker-compose.yml up`)로 풀린 경우,
+# HERMES_FLEET_DIR 에는 fleet.example.yaml 이 없다. 그 아래(2단계까지, 글롭)에서 실제 hermes-fleet 폴더를 찾아 바꿔 끼운다.
+if [ ! -f "$FLEET_DIR/fleet.example.yaml" ] && [ ! -f "$FLEET_DIR/fleet.yaml" ]; then
+  found=""
+  for c in "$FLEET_DIR"/hermes-fleet/fleet.example.yaml "$FLEET_DIR"/*/fleet.example.yaml "$FLEET_DIR"/*/hermes-fleet/fleet.example.yaml; do
+    [ -f "$c" ] && { found="$c"; break; }
+  done
+  if [ -n "$found" ]; then
+    FLEET_DIR="$(dirname "$found")"
+    export HERMES_FLEET_DIR="$FLEET_DIR"
+    echo "[entrypoint] HERMES_FLEET_DIR 보정: ${HERMES_FLEET_DIR_ORIG:-$FLEET_DIR} → $FLEET_DIR (compose 를 hermes-fleet 폴더에서, 또는 scripts/monitor.sh up 으로 실행하면 보정이 필요 없습니다)"
+  else
+    echo "[entrypoint] 경고: $FLEET_DIR 에 hermes-fleet 이 없습니다 — FLEET_DIR 환경변수로 hermes-fleet 경로를 지정하거나 scripts/monitor.sh up 을 쓰세요" >&2
+  fi
+fi
 if [ -f "$FLEET_DIR/fleet.yaml" ]; then
   echo "[entrypoint] 기존 하네스 설정 사용: $FLEET_DIR/fleet.yaml"
 elif [ "${HERMES_INIT:-auto}" = "skip" ]; then
