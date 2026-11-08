@@ -200,7 +200,8 @@ def _cited_files_exist(raw: dict[str, Any], repo_root: Path | None) -> bool:
     return any((repo_root / str(f).strip().split(":")[0]).exists() for f in files)
 
 
-def write_proposals(proposals: list[dict[str, Any]], directory: Path, log=print, repo_root: Path | None = None) -> list[Path]:
+def write_proposals(proposals: list[dict[str, Any]], directory: Path, log=print, repo_root: Path | None = None, status: str = "proposed") -> list[Path]:
+    """status: proposed(사람 승인 필요) | todo(승인 없이 바로 진행 — approval 모드 auto)."""
     existing = [t.title.strip() for t in load_tickets(directory)]
     created: list[Path] = []
     for raw in proposals:
@@ -216,17 +217,17 @@ def write_proposals(proposals: list[dict[str, Any]], directory: Path, log=print,
             log(f"[discover] skip: cited files do not exist: {raw.get('files')}")
             continue
         try:
-            path = write_ticket(directory, next_ticket_id(directory), status="proposed", **p)
+            path = write_ticket(directory, next_ticket_id(directory), status=status, **p)
         except TicketError as exc:
             log(f"[discover] skip invalid proposal: {exc}")
             continue
         existing.append(p["title"])
         created.append(path)
-        log(f"[discover] proposed {path.name}")
+        log(f"[discover] proposed {path.name}" + (" (auto-approved → todo)" if status == "todo" else ""))
     return created
 
 
-def run_discover(profile: RepoProfile, settings: Settings | None = None, max_proposals: int = 2, log=print, org: dict[str, Any] | None = None) -> list[Path]:
+def run_discover(profile: RepoProfile, settings: Settings | None = None, max_proposals: int = 2, log=print, org: dict[str, Any] | None = None, status: str = "proposed") -> list[Path]:
     from crewai import Crew, Process, Task  # noqa: WPS433
 
     settings = settings or Settings.from_env()
@@ -245,4 +246,4 @@ def run_discover(profile: RepoProfile, settings: Settings | None = None, max_pro
     proposals = parse_proposals(text)[:max_proposals]
     if not proposals:
         log(f"[discover][{profile.name}] no parsable proposals in model output")
-    return write_proposals(proposals, profile.backlog_dir, log=log, repo_root=profile.root)
+    return write_proposals(proposals, profile.backlog_dir, log=log, repo_root=profile.root, status=status)

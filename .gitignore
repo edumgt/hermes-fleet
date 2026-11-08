@@ -5,3 +5,6 @@ __pycache__/
 .env
 state/
 logs/
+qa/out/
+# 환경별 설정 — `hermes-fleet init` 이 fleet.example.yaml 에서 만든다 (다른 레포 이름·경로·배포 대상이 들어가므로 공개 레포에 올리지 않는다)
+fleet.yaml

@@ -1,6 +1,6 @@
 # Hermes Fleet — 상위 폴더 다중 레포 하네스
 
-[webrtc-app/hermes](../webrtc-app/hermes/README.md)의 Hermes(CrewAI) 가상 조직을 **상위 폴더(`/home/ubuntu`) 수준으로 올린 하네스**입니다.
+Hermes(CrewAI) 가상 조직을 **클론한 폴더의 상위 디렉터리(root) 수준으로 올린 하네스**입니다.
 root 아래 git 저장소 중 **프런트엔드(FE)와 백엔드(BE)가 모두 분명한 레포만** 골라, **새벽 01:00~08:00에 PC가 켜져 있을 때** 레포를 하나씩 순회하며
 PM → 디자이너 → 개발자 ⇄ QA 크루가 티켓을 처리하고, 하루 한 번 검증을 통과한 브랜치만 기준 브랜치에 머지·push 합니다.
 
@@ -43,6 +43,28 @@ hermes-fleet/
 
 둘 다 있어야 대상이며, git 저장소가 아니거나 `exclude` 에 있으면 제외됩니다. 자동 탐지가 틀리면 `fleet.yaml` 의 `repos.<name>.frontend/backend` 로 지정합니다.
 
+## 사람 승인 모드 (approval)
+
+`fleet.yaml` `approval.default: auto|manual` 와 `approval.repos: {레포: 모드}` 로 레포 성격에 따라 고른다. **auto**(현재 모든 레포의 기본값) 는 Tech Lead 발굴 제안이 바로 `todo` 로 들어가 사람 승인 없이 크루가 진행하고, 남아 있던 `proposed` 티켓도 데몬이 다음 tick 에 자동 승인한다. **manual** 은 `proposed` 로 두고 웹의 ✓ 승인 또는 `hermes-fleet approve` 로 사람이 승인해야 진행한다. 웹 모니터 개요의 '기본 승인 모드' 와 레포 목록의 승인 열(자동/수동 클릭 전환, `*` = 레포 예외)에서 바꾸며 `PUT /api/approval`, `PUT /api/repos/{name}/approval` 로 저장된다. 발굴 상한(`discover.max_open_proposed`)은 auto 에서는 proposed+todo 합계로 센다.
+
+## FE 가이드 준수 측정 (Playwright)
+
+`scripts/monitor.sh qa` 는 docker compose 의 `playwright` 서비스(profile qa, `docker/playwright.Dockerfile`)로 모니터를 실제 Chromium 에서 열어 1920×1080(엄격)·1366×768(참고)에서 탭별 세로/가로 스크롤 없음·바닥 빈 띠 ≤ 80px, 상단 바 56px·사이드바 248/68px·트리거 16px·본문 여백 24/16px, 모달 정중앙(스케줄·확인·티켓)과 Esc 닫힘, 닫힌 모달 잔상 없음, 테마 토글, 브라우저 시간대가 달라도 KST 시계, 10px EDUMGT 푸터, Tailwind·Pretendard 로드, 콘솔 오류 없음을 채점한다. 결과는 `qa/out/report.json`, `qa/out/report.txt` 와 탭별 라이트/다크 스크린샷이며 FAIL 이 하나라도 있으면 종료 코드 1 이다(QA 의 VERDICT: FAIL 근거). `QA_MONITOR_URL` 로 다른 주소를, `QA_STRICT_WIDTHS` 로 엄격 폭을 바꾼다. `scripts/monitor.sh qa-shell` 은 컨테이너 셸이다.
+
+설치 위치: `fleet.yaml` 의 `root` 를 비우면 hermes-fleet 의 상위 폴더를 스캔하고(상대 경로는 fleet.yaml 기준), `scripts/monitor.sh` 가 `FLEET_DIR`/`FLEET_ROOT` 를 자동으로 넘기므로 어디에 클론해도 같은 위치의 다른 레포가 대상이 된다.
+
+## 공개 레포로 내보내기
+
+추적 파일에는 환경 정보가 없지만(설정은 `fleet.yaml`/`.env`/`state/` 로 분리, 모두 gitignore), 이 저장소의 **기존 커밋 히스토리**에는 예전 fleet.yaml 과 README 의 레포 이름·배포 대상이 남아 있습니다. 그래서 공개는 히스토리를 자르고 합니다.
+
+```bash
+scripts/publish-check.sh                 # 추적 파일 + 현재 히스토리 점검 (히스토리에서 걸리면 아래로)
+scripts/publish-check.sh --orphan public # 현재 추적 파일만 담은 단일 커밋 브랜치 'public' 생성(기존 브랜치·HEAD 유지) + 그 브랜치 점검
+git push <public-remote> public:main     # 통과하면 그 브랜치만 공개 원격에 올린다
+```
+
+받은 사람은 `scripts/init.sh` 로 자기 환경(형제 레포, LLM)을 읽어 시작하고, 웹 모니터는 fleet.yaml 이 없으면 상단에 초기화 안내 배너를 띄우고 상위 폴더를 읽기 전용으로 미리 보여 줍니다.
+
 ## 하루 흐름 (cron 기준)
 
 | 시각 | 동작 |
@@ -54,19 +76,26 @@ hermes-fleet/
 | 08:00 | 시간대 종료 → 데몬 종료. 이후 cron 이 깨워도 시간대 밖이라 즉시 종료(로그 없음) |
 | 언제나 | 웹/CLI 요청(`state/requests/`)은 데몬이 매 tick 가장 먼저 처리. 시간대 밖에는 2분 간격 `daemon --on-demand` 러너(같은 flock)가 요청만 처리하고 종료 |
 
-사람이 하는 일은 webrtc-app 과 같습니다: 제안 승인(`approve`), 자동 머지 전 리뷰(막으려면 티켓을 `blocked` 로), blocked 티켓 처리.
+사람이 하는 일: 제안 승인(`approve`, approval 모드가 manual 일 때), 자동 머지 전 리뷰(막으려면 티켓을 `blocked` 로), blocked 티켓 처리.
 레포가 기준 브랜치가 아닌 다른 브랜치에 있거나 작업 트리가 더러우면 **건드리지 않고 건너뜁니다**(사람이 작업 중인 것으로 간주).
 
-## 설치
+## 설치 (받은 직후 — init 단계)
+
+공개 레포에는 다른 레포 이름·경로·배포 대상이 들어 있지 않습니다. 그런 값은 전부 받은 사람의 환경에서 `init` 이 만드는 gitignore 파일(`fleet.yaml`, `.env`, `state/`)에만 존재합니다.
+
+가장 짧은 길은 Docker 입니다. 작업 대상 레포들이 있는 폴더 안에 클론하고 그 폴더에서 `docker compose up -d` 를 실행하면, 모니터 컨테이너가 **기존 fleet.yaml 이 있으면 그대로 쓰고, 없으면 상위 폴더를 읽어 자동 init**(fleet.yaml·.env 생성, LLM 점검) 한 뒤 http://127.0.0.1:8787 에 뜹니다. LLM 이 Ollama 가 아니면 `HERMES_INIT_ARGS="--provider openai --base-url http://host.docker.internal:1234/v1 --model <model>" docker compose up -d` 처럼 넘기고, 자동 init 을 끄려면 `HERMES_INIT=skip`. 크루(데몬)는 호스트에서 돌므로 그다음 `scripts/install-cron.sh` 를 등록합니다.
 
 ```bash
-cd /home/ubuntu/hermes-fleet
-cp -n .env.example .env            # Ollama 가 Windows 호스트면 수정 불필요(게이트웨이 자동 탐지)
-uv sync --extra dev
+git clone <this-repo> hermes-fleet && cd hermes-fleet      # 작업 대상 레포들이 있는 폴더 안에 클론한다 (형제 폴더가 후보가 된다)
+docker compose up -d               # (Docker 경로) fleet.yaml 없으면 자동 init → 웹 모니터. 있으면 기존 설정 유지
+scripts/init.sh                    # ① 상위 폴더의 git 저장소를 스캔해 FE/BE 탐지 → 대상 선택(대화형; --yes 면 전부)
+                                   # ② fleet.example.yaml → fleet.yaml, .env.example → .env  ③ LLM 엔드포인트·모델 점검  ④ 다음 단계 안내
+scripts/init.sh --yes --root /path/to/repos --provider openai --base-url http://localhost:1234/v1 --model qwen2.5-coder:7b   # 비대화 예
 uv run pytest                      # 자체 테스트
-scripts/hermes-fleet check         # 엔드포인트·모델(hermes3:8b, qwen2.5-coder:7b)·설정·대상 레포 점검
+scripts/hermes-fleet check         # 엔드포인트·모델·설정·대상 레포 점검
 scripts/hermes-fleet repos -v      # 대상 레포와 검증 명령
 scripts/install-cron.sh            # 10분 간격 데몬 기동 시도(시간대는 fleet.yaml active_hours) + 2분 간격 on-demand 러너(웹/CLI 요청 처리) 등록 (해제: --remove)
+scripts/publish-check.sh           # (공개 전) 추적 파일·히스토리에 개인 환경 정보가 남았는지 점검
 ```
 
 ## 명령
@@ -102,10 +131,13 @@ scripts/monitor.sh down
 scripts/monitor.sh demo      # 가짜 fleet 으로 미리보기(포트 8790) — 첫 실행 전에 화면을 보고 싶을 때. 해제: demo-down
 scripts/monitor.sh local     # Docker 없이: uv sync --extra monitor 후 uv 가상환경으로 실행 (= hermes-fleet monitor)
 ```
+모니터 자체가 FE 가이드(templates/org.yaml frontend_guide)의 참조 구현이다: 공통 셸 = 상단 바 왼쪽 사이드바 트리거(데스크톱 패널 아이콘·모바일 햄버거, Ctrl/⌘+B, Alt+M) + 좌측 오프캔버스 LNB(유일한 1차 메뉴). 데스크톱 ≥1024px 은 펼침 248px ↔ 아이콘 레일 68px(툴팁·활성 막대·배지 점) push 모드로 `localStorage hermes.lnb` 에 기억, 모바일은 시트(dim·Esc/바깥 클릭 닫힘·포커스 트랩·선택 시 닫힘). 상태는 `<body data-lnb="open|rail|sheet|closed">` 하나로 표현하고 Tailwind `group-data` 변형으로 그린다(.top/main 의 push 오프셋만 CSS — 비계층 CSS 가 유틸리티보다 우선하기 때문). 하단에 데몬 상태·테마 토글(시스템→라이트→다크, `data-theme` + `localStorage hermes.theme`)·스케줄 설정·사용자. 경계·여백 토큰(사이드바 경계선에서 트리거 16px·본문 24px, 상하 16px, 카드 간격 12px·패딩 16px·반경 12px, z-index 30/40/50/60), 하단 10px 검정 EDUMGT 고정 푸터(본문·사이드바는 그 위에서 끝남), 테마 토글(시스템→라이트→다크, 토큰만으로 색 정의). 모든 시각은 한국 시간: 백엔드는 settings 임포트 시 TZ=Asia/Seoul 고정, 프런트는 Intl timeZone Asia/Seoul 로 표시(오프셋 없는 값은 KST 로 해석, GitHub 의 UTC 는 변환), cron 에 CRON_TZ=Asia/Seoul. 티켓 상태 색은 dataviz 검증기(인접쌍 CVD ΔE ≥ 7.2 + 범례·간격 보조 인코딩)를 통과한 팔레트. Tailwind CSS v4 Play CDN(@tailwindcss/browser@4.3.5, @theme 으로 기존 CSS 변수 매핑; 로드 실패 시 `html.no-tw` 최소 폴백 + 안내), Pretendard, AG Grid Community, ApexCharts, FHD 1920×1080 에서 모든 탭이 브라우저 세로 스크롤 없이 한 화면(긴 목록은 카드 내부 스크롤, 개요는 레포 목록이 남은 높이를 차지, 레포 상세는 패널 내부 스크롤), 중요 입출력은 모달(`<dialog>`: 스케줄·날짜별 시간대 편집, 티켓 상세, 중지/배포 확인 — 브라우저 confirm 미사용). 남은 작업: 수제 CSS(style.css)의 Tailwind 전면 전환은 hermes/backlog HX-001 티켓으로 크루에 제안되어 있다.
+
 
 | 탭 | 보여 주는 것 |
 |---|---|
 | 개요 | 데몬 상태(실행 중·대기·응답 없음·미실행·일시정지), 작동 시간대/다음 시작/머지 창, LLM 엔드포인트와 역할별 모델, 현재 처리 중인 티켓·단계. 차트: 티켓 상태 분포(도넛), 레포별 티켓 상태(누적 막대), 최근 14일 QA 결과·머지 건수. **레포 목록 그리드**: root 아래 모든 git 저장소와 선정/제외 사유, 브랜치·작업 트리·검증·티켓·처리 결과·마지막 머지 |
+| 크루 룸 | 레포별로 PM·디자이너·개발자·QA·Tech Lead 를 **3D 사람 아바타**(Three.js, canvas)로 세워 두고 daemon.log 를 역할별 대화로 바꿔 보여 준다. 작업 중인 역할은 키보드를 치고 모니터가 켜지며, 산출물(Final Answer)·도구 호출·QA 판정·제안은 머리 위 말풍선과 오른쪽 **아바타 대화방**에 흐른다. 완료는 손을 들고, 실패/결함은 머리를 젓는다. 레포 선택·활동 레포 자동 전환·아바타 클릭(역할 필터). `/api/crew`, SSE `/api/crew/stream` (`hermes_fleet/monitor/crew.py`) |
 | 레포 상세 | 레포 목록에서 행을 클릭(또는 드롭다운)하면 그 레포의 **작업 내역**: 티켓별 단계(PM/디자인/개발/QA) 소요 시간, 이 레포의 일별 처리 결과, 처리 기록(state/<repo>.json), 티켓, 자동 머지 기록(merge-report.md), 이 레포의 데몬 로그 |
 | 티켓 | 모든 레포의 백로그를 레포·상태·빠른 검색으로 필터. 티켓을 열면 수용 기준·본문·단계 타임라인(rangeBar)·`git diff --stat`·산출물(prd/design/dev-report/qa-report/summary). 산출물이 `hermes/<ID>` 브랜치에만 있으면 브랜치에서 읽는다(⎇ 표시) |
 | 워크플로 | 레포마다 **발굴 → 승인 → 크루 → 리뷰 → 머지·검증 → GitHub push → CI/CD(Actions) → 배포(AWS…)** 8단계 보드. 각 셀은 그 단계가 이 레포에서 자동인지(파랑) · 사람이 하는지(빗금) · 해당 없는지(점선)를, 점은 최근 상태(티켓 수, 마지막 머지/push, Actions 결과, 배포 결과)를 보여 준다. 레포 상세에도 같은 체인과 원격·워크플로·배포 흔적·Actions 최근 실행이 나온다 |
@@ -117,6 +149,7 @@ scripts/monitor.sh local     # Docker 없이: uv sync --extra monitor 후 uv 가
 | 조작 | 하는 일 | 반영 |
 |---|---|---|
 | 스케줄 저장 | 작동 시간대·자동 머지 시각·종료 전 여유(분)·폴링 주기를 `fleet.yaml` 에 저장 | 데몬이 돌고 있으면 다음 tick 에 다시 읽음. cron 은 시간을 고정하지 않으므로 새 시간대 안이면 10분 안에 데몬이 시작되고, 밖이면 종료 |
+| 날짜별 시간대 달력 | 개요 > 제어의 달력에서 날짜를 골라(클릭·Shift 범위) '시간대 지정 / 쉬는 날 / 기본으로 되돌림' 을 적용 → `fleet.yaml` `calendar:` 블록에 저장 (`PUT /api/calendar`) | 데몬은 `Schedule`(hermes_fleet/schedule.py) 로 '오늘 날짜의 예외 → 없으면 active_hours' 순으로 판정. 자정을 넘는 창은 다음 날 새벽까지 이어지고, off 인 날은 새 창을 열지 않는다. 다음 tick 에 핫리로드 |
 | 전체 일시정지/재개 | `state/PAUSE` 생성/삭제 | 데몬이 새 작업·요청을 시작하지 않음(진행 중 티켓은 마침) |
 | 레포 ▶ 실행 / 🔍 발굴 / ⇅ 머지 | `state/requests/` 에 요청 파일을 쌓음 | 야간 데몬은 매 tick 요청을 먼저 처리하고, 시간대 밖에는 cron 의 2분 간격 `daemon --on-demand` 러너가 처리 |
 | 레포 ⏹ 중지 / ▶ 재개 | `stop` 요청 + `state/paused/<repo>` 마커 | 진행 중 크루는 다음 단계 경계에서 중단(티켓 blocked, 부분 작업 커밋), 레포는 재개 전까지 건너뜀 |
@@ -134,7 +167,7 @@ FE/BE 가 확인되지 않는 저장소는 켜도 대상이 되지 않으므로 
 
 동작 방식과 제약:
 
-- 컨테이너는 호스트 root(`/home/ubuntu`)를 **같은 경로에 읽기 전용**으로 마운트해 fleet.yaml·state/·logs/·각 레포의 git 을 그대로 읽고, `hermes-fleet` 디렉터리만 쓰기 가능으로 겹쳐 마운트합니다. 컨테이너가 쓰는 것은 `fleet.yaml`(선택·스케줄), `state/PAUSE`, `state/paused/`, `state/requests/` 뿐입니다.
+- 컨테이너는 호스트 root(hermes-fleet 의 상위 폴더)를 **같은 경로에 읽기 전용**으로 마운트해 fleet.yaml·state/·logs/·각 레포의 git 을 그대로 읽고, `hermes-fleet` 디렉터리만 쓰기 가능으로 겹쳐 마운트합니다. 컨테이너가 쓰는 것은 `fleet.yaml`(선택·스케줄), `state/PAUSE`, `state/paused/`, `state/requests/` 뿐입니다.
 - 데몬 실행 판정: `state/daemon.lock` 의 flock 이 잡혀 있으면 확정. Docker Desktop(별도 VM)에서는 호스트의 flock 이 보이지 않으므로 daemon.log 의 `[fleet] start` / `exiting` 마커와 최근 갱신 시각(폴링 주기의 3배, 최소 45분)으로 판단합니다. 종료 마커 없이 로그가 오래 멈추면 "응답 없음", 작동 시간대인데 시작 기록이 없으면 "미실행"으로 표시합니다.
 - LLM 점검은 컨테이너에서 `host.docker.internal:11434`(Windows Ollama)로 나갑니다. 다른 위치면 `.env` 에 `MONITOR_OLLAMA_HOST` 또는 `MONITOR_HERMES_BASE_URL` 을 지정합니다.
 - 설치 위치가 다르면 `FLEET_ROOT`(마운트할 root), `FLEET_DIR`(hermes-fleet 경로), `MONITOR_PORT`, `MONITOR_BIND`(기본 127.0.0.1; LAN 에 열려면 0.0.0.0), `TZ`(기본 Asia/Seoul — 데몬과 같은 시간대여야 시간대 판정이 맞음) 를 환경변수나 `.env` 로 넘깁니다.
@@ -158,11 +191,11 @@ PM·디자이너·개발자·QA 프롬프트와 Tech Lead 발굴 프롬프트에
 - 바꾸려면 `templates/org.yaml` 의 `frontend_guide` 를 수정합니다(버전 올리기, 항목 추가). 레포별로 다르게 하려면 `<repo>/hermes/config/org.yaml` 에 `frontend_guide` 를 다시 정의하고, 끄려면 `frontend_guide: false` 를 둡니다(정의가 없으면 템플릿 것을 상속).
 - 웹 모니터의 개요 > 설정 카드에서 현재 적용 중인 가이드 요약을 볼 수 있습니다.
 
-## 레포 안의 규약 (webrtc-app 과 동일)
+## 레포 안의 규약
 
 - 티켓: `<repo>/hermes/backlog/HX-nnn-*.md` (YAML frontmatter + 본문). `area` 는 frontend|backend|signaling|fullstack|api|db|infra|docs.
 - 산출물: `<repo>/hermes/workspace/<ID>/` (prd.md, design.md, dev-report.md, qa-report.md, summary.md). 로그·발굴 원문은 gitignore.
-- 조직 오버라이드: `<repo>/hermes/config/org.yaml` (webrtc-app 은 자체 정의 사용).
+- 조직 오버라이드: `<repo>/hermes/config/org.yaml` (없으면 templates/org.yaml 을 상속).
 - 브랜치 `hermes/<ID>`, 커밋 서명 `Co-Authored-By: Hermes Fleet`.
 
 ## hermes-fleet 자신도 크루의 대상

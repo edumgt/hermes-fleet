@@ -7,6 +7,7 @@ import pytest
 from conftest import commit_all, g
 from test_fleet import make_daemon
 
+from hermes_fleet.schedule import Schedule
 from hermes_fleet import fleetfile as ff
 from hermes_fleet import requests as rq
 from hermes_fleet.backlog import find_ticket, write_ticket
@@ -183,11 +184,11 @@ def test_schedule_edit_and_daemon_hot_reload(tmp_path: Path, node_python_repo: P
     p = detect_profile(node_python_repo)
     dm, logs = make_daemon(tmp_path, [p], dt.datetime(2026, 11, 8, 8, 30), monkeypatch)   # 08:30 — 기본 창 밖
     dm.cfg = FleetConfig.load(y)
-    dm.window = None
+    dm.schedule = Schedule(None)
     ff.update_schedule(y, active_hours="01:00-09:30")
     os.utime(y, (time.time() + 4, time.time() + 4))
     dm._refresh_config()
-    assert dm.window == (dt.time(1, 0), dt.time(9, 30)) and any("fleet.yaml changed" in m for m in logs)
+    assert dm.schedule.default == (dt.time(1, 0), dt.time(9, 30)) and any("fleet.yaml changed" in m for m in logs)
 
 
 def test_sandbox_deny_paths(tmp_path: Path):

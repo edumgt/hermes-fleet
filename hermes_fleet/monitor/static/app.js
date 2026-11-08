@@ -7,14 +7,22 @@
   const STAGES = ["pm", "design", "dev", "qa"];
   const STAGE_KO = { pm: "PM", design: "디자인", dev: "개발", qa: "QA" };
   const REFRESH_MS = 10000;
-  const state = { overview: null, stats: null, repos: [], tickets: [], tab: "overview", es: null, logLines: [], repo: null, repoDetail: null, grids: {}, charts: {}, skew: 0 };
+  const state = { overview: null, stats: null, repos: [], tickets: [], tab: "overview", es: null, logLines: [], repo: null, repoDetail: null, grids: {}, charts: {}, skew: 0 , crew: { es: null, rooms: [], messages: [], repo: "", role: "", room: null, daemon: null, ready: false } };
 
   // ---------- 유틸 ----------
   const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
-  const fmtTs = (iso) => (iso ? String(iso).replace("T", " ") : "-");
+  // ---------- 시간: 모든 표시는 한국 시간(Asia/Seoul). 오프셋 없는 문자열은 KST 로 해석, Z/오프셋 값은 KST 로 변환 ----------
+  const KST = "Asia/Seoul";
+  const hasZone = (s) => /(?:Z|[+-]\d{2}:?\d{2})$/.test(s);
+  const parseTs = (iso) => { if (iso == null || iso === "") return null; if (typeof iso === "number") return new Date(iso); const s = String(iso).trim().replace(" ", "T"); const d = new Date(hasZone(s) ? s : s + "+09:00"); return isNaN(d) ? null : d; };
+  const kstFmt = new Intl.DateTimeFormat("sv-SE", { timeZone: KST, year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false });
+  const kstParts = (d) => kstFmt.format(d).replace("T", " ");   // sv-SE → "YYYY-MM-DD HH:mm:ss"
+  const fmtTs = (iso) => { if (!iso) return "-"; const s = String(iso); if (!hasZone(s.trim())) return s.replace("T", " ").slice(0, 19); const d = parseTs(s); return d ? kstParts(d) : s; };
+  const kstTime = (ms, withSec = false) => { const t = kstParts(new Date(ms)); return withSec ? t.slice(11, 19) : t.slice(11, 16); };
+  const kstToday = () => kstParts(new Date(Date.now() + state.skew)).slice(0, 10);
   const ago = (iso) => {
     if (!iso) return "-";
-    const d = (Date.now() + state.skew - new Date(String(iso).replace(" ", "T")).getTime()) / 1000;   // 서버 시각 기준(브라우저 시간대가 달라도 맞도록)
+    const d = (Date.now() + state.skew - parseTs(iso).getTime()) / 1000;   // 서버(KST) 시각 기준 — 브라우저 시간대와 무관
     if (!isFinite(d)) return iso;
     if (d < 60) return `${Math.round(d)}초 전`;
     if (d < 3600) return `${Math.round(d / 60)}분 전`;
@@ -28,12 +36,29 @@
   const verdictBadge = (v) => (v === "PASS" ? badge("PASS", "good") : v === "FAIL" ? badge("FAIL", "crit") : v === "ERROR" ? badge("ERROR", "serious") : badge(v || "-"));
   const toast = (msg, ok = false) => { const t = $("#toast"); t.textContent = msg; t.hidden = false; t.style.background = ok ? "var(--good)" : "var(--critical)"; clearTimeout(t._h); t._h = setTimeout(() => (t.hidden = true), 4500); };
   const cssVar = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
-  const isDark = () => window.matchMedia("(prefers-color-scheme: dark)").matches && document.documentElement.dataset.theme !== "light";
+  const isDark = () => document.documentElement.dataset.theme === "dark" || (window.matchMedia("(prefers-color-scheme: dark)").matches && document.documentElement.dataset.theme !== "light");
   const palette = () => ({
     status: STATUSES.map((s) => cssVar(`--st-${s}`)), verdict: [cssVar("--good"), cssVar("--critical"), cssVar("--serious")],
     stages: [cssVar("--series-1"), cssVar("--series-2"), cssVar("--series-3"), cssVar("--series-4")], merged: cssVar("--series-7"),
     text: cssVar("--text-2"), muted: cssVar("--muted"), grid: cssVar("--grid"), surface: cssVar("--surface"),
   });
+
+  // ---------- 모달 (FE 가이드: 중요 입력·확인·상세 출력은 모달 팝업, 브라우저 confirm 금지) ----------
+  function openDialog(el) { if (el && !el.open) el.showModal(); }
+  document.addEventListener("click", (ev) => {
+    const d = ev.target.closest("dialog.modal");
+    if (ev.target.matches("[data-close]") && d) { d.close(); return; }
+    if (ev.target.tagName === "DIALOG" && ev.target.classList.contains("modal")) {   // 바깥(backdrop) 클릭 = 닫기 (패딩 0 이라 dialog 자체가 곧 backdrop 영역)
+      const r = ev.target.getBoundingClientRect();
+      if (ev.clientX < r.left || ev.clientX > r.right || ev.clientY < r.top || ev.clientY > r.bottom) ev.target.close();
+    }
+  });
+  function confirmModal(message, { title = "확인", ok = "확인", danger = true } = {}) {
+    const d = $("#confirm-dialog");
+    $("#confirm-title").textContent = title; $("#confirm-msg").textContent = message;
+    const okBtn = $("#confirm-ok"); okBtn.textContent = ok; okBtn.className = `btn ${danger ? "danger" : "primary"}`;
+    return new Promise((resolve) => { d.returnValue = "cancel"; d.addEventListener("close", () => resolve(d.returnValue === "ok"), { once: true }); openDialog(d); okBtn.focus(); });
+  }
 
   async function api(path, opts) {
     const r = await fetch(path, { cache: "no-store", ...opts });
@@ -133,9 +158,86 @@
   function destroyCharts() { Object.values(state.charts).forEach((c) => c.destroy()); state.charts = {}; }
 
   // ---------- 탭 ----------
+  // ---------- 셸: 사이드바 트리거 + 오프캔버스 LNB (데스크톱 펼침/아이콘 레일 push · 모바일 시트) ----------
+  const LNB_KEY = "hermes.lnb", THEME_KEY = "hermes.theme";
+  const lnbDesktop = window.matchMedia("(min-width: 1024px)");
+  const lnb = { pref: "open", mobileOpen: false };
+  const lnbMode = () => (lnbDesktop.matches ? lnb.pref : lnb.mobileOpen ? "sheet" : "closed");
+  function applyLnb() {
+    const mode = lnbMode();
+    document.body.dataset.lnb = mode;
+    const expanded = mode === "open" || mode === "sheet";
+    const t = $("#lnb-toggle");
+    t.setAttribute("aria-expanded", String(expanded));
+    t.setAttribute("aria-label", lnbDesktop.matches ? (mode === "open" ? "사이드바를 아이콘 레일로 접기" : "사이드바 펼치기") : (expanded ? "메뉴 닫기" : "메뉴 열기"));
+    $("#lnb").setAttribute("aria-hidden", String(mode === "closed"));
+    $("#lnb-backdrop").hidden = mode !== "sheet";
+    $("#lnb-brand").setAttribute("aria-label", mode === "rail" ? "사이드바 펼치기" : "Hermes Fleet");
+  }
+  function setLnbPref(pref) { lnb.pref = pref; try { localStorage.setItem(LNB_KEY, pref); } catch (_) { /* 저장소 없음 */ } applyLnb(); }
+  function toggleLnb() {
+    if (lnbDesktop.matches) setLnbPref(lnb.pref === "open" ? "rail" : "open");
+    else { lnb.mobileOpen = !lnb.mobileOpen; applyLnb(); if (lnb.mobileOpen) { const first = $("#lnb .lnb-item[aria-current='page']") || $("#lnb .lnb-item"); if (first) first.focus(); } }
+  }
+  function closeSheet() { if (!lnbDesktop.matches && lnb.mobileOpen) { lnb.mobileOpen = false; applyLnb(); $("#lnb-toggle").focus(); } }
+  function initLnb() {
+    try { const v = localStorage.getItem(LNB_KEY); if (v === "open" || v === "rail") lnb.pref = v; else if (v === "0") lnb.pref = "rail"; } catch (_) { /* ignore */ }
+    applyLnb();
+    $("#lnb-toggle").addEventListener("click", toggleLnb);
+    $("#lnb-brand").addEventListener("click", () => { if (lnbDesktop.matches && lnb.pref === "rail") setLnbPref("open"); else showTab("overview"); });
+    $("#lnb-collapse").addEventListener("click", () => setLnbPref("rail"));
+    $("#lnb-backdrop").addEventListener("click", closeSheet);
+    $$("[data-lnb-close]").forEach((b) => b.addEventListener("click", closeSheet));
+    document.addEventListener("keydown", (ev) => {
+      if (ev.key === "Escape") closeSheet();
+      if ((ev.ctrlKey || ev.metaKey) && !ev.shiftKey && (ev.key === "b" || ev.key === "B") && !ev.target.closest("input, textarea, [contenteditable]")) { ev.preventDefault(); toggleLnb(); }
+      if (ev.altKey && (ev.key === "m" || ev.key === "M")) { ev.preventDefault(); toggleLnb(); }
+      if (ev.key === "Tab" && lnbMode() === "sheet") {   // 시트 모드 포커스 트랩
+        const f = $$("#lnb button, #lnb a, #lnb [tabindex]:not([tabindex='-1'])").filter((el) => !el.disabled && el.offsetParent !== null);
+        if (!f.length) return;
+        const first = f[0], last = f[f.length - 1];
+        if (ev.shiftKey && document.activeElement === first) { ev.preventDefault(); last.focus(); } else if (!ev.shiftKey && document.activeElement === last) { ev.preventDefault(); first.focus(); }
+      }
+    });
+    lnbDesktop.addEventListener("change", () => { lnb.mobileOpen = false; applyLnb(); });
+    $("#lnb-settings").addEventListener("click", () => { openDialog($("#sched-dialog")); if (state.overview) renderCalendar(state.overview); closeSheet(); });
+    // 테마: 시스템 → 라이트 → 다크 (data-theme, localStorage)
+    const THEME_LABEL = { system: "테마: 시스템", light: "테마: 라이트", dark: "테마: 다크" };
+    function applyTheme(mode, persist) {
+      if (mode === "system") delete document.documentElement.dataset.theme; else document.documentElement.dataset.theme = mode;
+      $("#theme-label").textContent = THEME_LABEL[mode]; $("#theme-toggle").dataset.label = THEME_LABEL[mode];
+      if (persist) { try { localStorage.setItem(THEME_KEY, mode); } catch (_) { /* ignore */ } }
+      rethemeAll();
+    }
+    let theme = "system"; try { theme = localStorage.getItem(THEME_KEY) || "system"; } catch (_) { /* ignore */ }
+    if (!["system", "light", "dark"].includes(theme)) theme = "system";
+    applyTheme(theme, false);
+    $("#theme-toggle").addEventListener("click", () => { theme = theme === "system" ? "light" : theme === "light" ? "dark" : "system"; applyTheme(theme, true); });
+    // Tailwind CDN 로드 확인(가이드: 로드 실패 시 안내 + 최소 구조 스타일로 대체)
+    window.addEventListener("load", () => setTimeout(() => {
+      const probe = $("#tw-probe");   // 정적 프로브: Play CDN 은 DOM 변화를 비동기로 컴파일하므로 동적으로 만든 요소는 바로 판정할 수 없다
+      const ok = !!probe && getComputedStyle(probe).display === "none";
+      if (!ok) { document.documentElement.classList.add("no-tw"); toast("Tailwind CSS 를 CDN 에서 불러오지 못했습니다. 기본 스타일로 표시합니다."); }
+    }, 1500));
+  }
+  function rethemeAll() {
+    destroyCharts();
+    Object.values(state.grids).forEach((g) => g.setGridOption("theme", gridTheme()));
+    if (state.overview) renderOverview(state.overview);
+    if (state.tab === "repo" && state.repoDetail) renderRepo(state.repoDetail);
+    if (state.crew && state.crew.room) { state.crew.room.refreshTheme(); renderCrew(true); }
+  }
+  const TAB_TITLE = { overview: "개요", workflow: "워크플로", crew: "크루 룸", repos: "레포 목록", repo: "레포 상세", tickets: "티켓", timeline: "타임라인", logs: "로그" };
+  const TAB_SUB = { overview: "플릿 상태와 제어", workflow: "레포별 전달 체인", crew: "역할별 AI 작업 현황", repos: "대상 선택 · 승인 모드 · 제어", repo: "저장소 하나를 깊게", tickets: "백로그와 상세", timeline: "최근 활동", logs: "daemon.log 실시간" };
+
   function showTab(name) {
+    if (!TAB_TITLE[name]) return;
     state.tab = name;
-    $$(".tab").forEach((b) => b.classList.toggle("active", b.dataset.tab === name));
+    $$(".lnb-item[data-tab]").forEach((b) => { if (b.dataset.tab === name) b.setAttribute("aria-current", "page"); else b.removeAttribute("aria-current"); });
+    $("#page-title").textContent = TAB_TITLE[name] || name;
+    $("#page-sub").textContent = TAB_SUB[name] || "";
+    document.title = `${TAB_TITLE[name] || name} · Hermes Fleet Monitor`;
+    if (lnbMode() === "sheet") { lnb.mobileOpen = false; applyLnb(); }
     $$(".panel").forEach((p) => p.classList.toggle("active", p.id === `tab-${name}`));
     location.hash = name === "repo" && state.repo ? `repo=${state.repo}` : name;
     if (name === "logs") startLogStream();
@@ -143,8 +245,12 @@
     if (name === "tickets") loadTickets();
     if (name === "repo") { if (state.repo) loadRepo(state.repo); else { $("#r-empty").hidden = false; fillRepoSelect(); } }
     if (name === "workflow") loadWorkflow();
+    if (name === "repos" && state.overview) { renderRepoGrid(state.overview.repos); if (state.grids.repos) setTimeout(() => state.grids.repos.setGridOption("rowData", state.overview.repos), 50); }
+    if (name === "crew") startCrew();
+    if (state.crew.room) state.crew.room.setActive(name === "crew");
   }
-  $$(".tab").forEach((b) => b.addEventListener("click", () => showTab(b.dataset.tab)));
+  $$(".lnb-item[data-tab]").forEach((b) => b.addEventListener("click", () => showTab(b.dataset.tab)));   // 테마/설정 버튼도 .lnb-item 이므로 data-tab 있는 것만
+  initLnb();
 
   // ---------- 개요 ----------
   function daemonView(d, sch) {
@@ -160,8 +266,13 @@
   function renderOverview(o) {
     const d = o.daemon, sch = o.schedule, llm = o.llm;
     const dv = daemonView(d, sch);
+    $("#init-banner").hidden = o.initialized !== false;
     $("#daemon-dot").className = `dot ${dv.cls}`;
-    document.title = `${dv.text} · Hermes Fleet Monitor`;
+    $("#lnb-daemon-dot").className = `dot ${dv.cls}`; $("#lnb-daemon-text").textContent = `데몬 ${dv.text}`; $("#lnb-daemon").dataset.label = `데몬 ${dv.text}`;
+    const setBadge = (id, n, title) => { const b = $(id); if (!b) return; b.hidden = !n; b.textContent = n > 99 ? "99+" : String(n); b.title = title; };
+    setBadge("#lnb-badge-tickets", o.totals.proposed || 0, `승인 대기 ${o.totals.proposed || 0}건`);
+    setBadge("#lnb-badge-overview", (o.control && o.control.pending || []).length, `대기 중인 요청 ${(o.control && o.control.pending || []).length}건`);
+    const live = $("#lnb-live-crew"); if (live) live.hidden = !(d.activity && d.status === "running");
     const total = Object.values(o.totals).reduce((a, b) => a + b, 0);
     const active = o.totals["in-progress"] + o.totals.review;
     const processed = o.repos.filter((r) => r.eligible).reduce((a, r) => a + (r.processed_count || 0), 0);
@@ -174,7 +285,8 @@
       { label: "전개 범위", value: state.workflowTotals ? `<span style="font-size:16px">AWS <span class="c-good">${state.workflowTotals.aws}</span> · push <span class="c-good">${state.workflowTotals.push}</span> / ${state.workflowTotals.targets}</span>` : `<span class="c-muted">…</span>`, sub: state.workflowTotals ? `대상 ${state.workflowTotals.targets}개 중 자동 배포 ${state.workflowTotals.deploy_auto} · CI/CD ${state.workflowTotals.cicd}` : "워크플로 탭에서 계산" },
       { label: "현재 작업", value: d.activity ? `<span class="c-good" style="font-size:16px">${esc(d.activity.kind === "ticket" ? d.activity.id : d.activity.kind)}</span>` : `<span class="c-muted">없음</span>`, sub: d.activity ? `${d.activity.repo}${d.activity.stage ? ` · ${d.activity.stage.name} #${d.activity.stage.iteration}` : ""} · ${ago(d.activity.since)} 시작` : d.status === "running" ? "대기(폴링) 중" : "-" },
     ];
-    $("#tiles").innerHTML = tiles.map((t) => `<div class="tile"><div class="label">${t.label}</div><div class="value">${t.value}</div><div class="sub">${esc(t.sub)}</div></div>`).join("");
+    $("#tiles").innerHTML = tiles.map((t) => `<div class="tile${t.label === "대상 레포" ? " tile-link" : ""}" ${t.label === "대상 레포" ? 'data-open-tab="repos" role="button" tabindex="0" title="레포 목록 열기"' : ""}><div class="label">${t.label}</div><div class="value">${t.value}</div><div class="sub">${esc(t.sub)}</div></div>`).join("");
+    $$("#tiles [data-open-tab]").forEach((el) => { el.addEventListener("click", () => showTab(el.dataset.openTab)); el.addEventListener("keydown", (ev) => { if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); showTab(el.dataset.openTab); } }); });
     $("#totals-sum").textContent = `${total}개`;
 
     kv("#schedule-kv", [
@@ -221,6 +333,7 @@
       { headerName: "대상", field: "selected", width: 72, cellRenderer: SwitchRenderer, sortable: true, cellClass: "cell-center" },
       { headerName: "레포", field: "name", minWidth: 150, flex: 1.2, cellRenderer: htmlCell((d) => `<strong>${esc(d.name)}</strong>${d.has_remote ? "" : ` <span class="muted" title="원격 없음">⌂</span>`}${d.paused ? ` ${badge("일시정지", "serious")}` : ""}${(d.pending_requests || []).length ? ` <span class="muted" title="${esc(d.pending_requests.join(", "))}">⏳${d.pending_requests.length}</span>` : ""}`) },
       { headerName: "제어", field: "actions", width: 300, sortable: false, cellRenderer: ActionsRenderer, cellClass: "cell-center" },
+      { headerName: "승인", field: "approval", width: 96, cellRenderer: htmlCell((d) => d.fe_be_ok ? `<button class="appr ${d.approval}" data-approval="${esc(d.name)}" data-mode="${esc(d.approval)}" title="${d.approval === "auto" ? "자동: 제안이 바로 todo 로 들어가 사람 승인 없이 진행" : "수동: proposed 로 두고 사람이 승인"}${d.approval_override ? " (레포 예외)" : " (기본값)"} · 클릭하면 전환" ${state.overview && state.overview.config_writable ? "" : "disabled"}>${d.approval === "auto" ? "자동" : "수동"}${d.approval_override ? "*" : ""}</button>` : "-"), headerTooltip: "사람 승인 모드 (fleet.yaml approval)" },
       { headerName: "FE", field: "frontend", minWidth: 120, flex: 1, valueFormatter: (p) => p.value || "-" },
       { headerName: "BE", field: "backend", minWidth: 140, flex: 1, valueFormatter: (p) => p.value || "-" },
       { headerName: "브랜치", field: "current_branch", minWidth: 100, cellRenderer: htmlCell((d) => d.current_branch ? `${esc(d.current_branch)}${d.on_base ? "" : ` <span class="c-warn" title="기준 브랜치 아님">≠${esc(d.base_branch)}</span>`}` : `<span class="muted">${esc(d.base_branch || "-")}</span>`) },
@@ -234,7 +347,7 @@
     const grid = makeGrid("repos", $("#grid-repos"), cols, {
       empty: "root 아래에 git 저장소가 없습니다.",
       gridOptions: {
-        domLayout: "autoHeight", getRowId: (p) => p.data.name, rowHeight: 38,
+        getRowId: (p) => p.data.name, rowHeight: 36,
         rowClassRules: { "ag-row-dim": (p) => !p.data.eligible, "ag-row-pointer": () => true },
         onRowClicked: (e) => { if (e.event && e.event.target.closest && e.event.target.closest(".cell-switch, .cell-actions")) return; openRepo(e.data.name); },
         tooltipShowDelay: 300,
@@ -244,6 +357,17 @@
     $("#repo-count").textContent = `(${repos.length})`;
   }
 
+  document.addEventListener("click", async (ev) => {
+    const b = ev.target.closest("button[data-approval]");
+    if (!b || b.disabled) return;
+    ev.stopPropagation();
+    const next = b.dataset.mode === "auto" ? "manual" : "auto";
+    try {
+      const r = await api(`/api/repos/${encodeURIComponent(b.dataset.approval)}/approval`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ mode: next }) });
+      toast(`${b.dataset.approval}: 승인 모드 → ${r.approval === "auto" ? "자동(사람 승인 불필요)" : "수동(사람 승인 필요)"} · fleet.yaml 저장, 데몬은 다음 tick 반영`, true);
+      refresh();
+    } catch (e) { toast(`승인 모드 변경 실패: ${e.message}`); }
+  });
   async function toggleRepo(name, selected, inputEl) {
     try {
       const res = await api(`/api/repos/${encodeURIComponent(name)}/selection`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ selected }) });
@@ -292,12 +416,13 @@
     ].join("");
   }
   function bindActions(root) {
-    $$("button[data-act]", root).forEach((b) => b.addEventListener("click", (ev) => {
+    $$("button[data-act]", root).forEach((b) => b.addEventListener("click", async (ev) => {
       ev.stopPropagation();
       const { act, repo, ticket } = b.dataset;
       if (act === "resume") return setRepoPaused(repo, false);
       if (act === "pause") return setRepoPaused(repo, true);
-      if (act === "stop" && !confirm(`${repo}: 진행 중인 작업을 단계 경계에서 중단하고 레포를 일시정지합니다. 계속할까요?`)) return;
+      if (act === "stop" && !(await confirmModal(`${repo}: 진행 중인 작업을 단계 경계에서 중단하고 레포를 일시정지합니다. 계속할까요?`, { title: "레포 중지", ok: "중지" }))) return;
+      if (act === "deploy" && !(await confirmModal(`${repo}: fleet.yaml 의 deploy.command 를 호스트에서 실행합니다. 계속할까요?`, { title: "배포 요청", ok: "배포", danger: false }))) return;
       return sendRequest(repo, act, ticket);
     }));
   }
@@ -317,17 +442,29 @@
     pa.onclick = async () => {
       try { await api("/api/pause", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ paused: !c.paused_all }) }); toast(c.paused_all ? "재개했습니다" : "전체 일시정지했습니다", true); refresh(); } catch (e) { toast(`실패: ${e.message}`); }
     };
+    const sch = o.schedule;
+    $("#sched-summary").innerHTML = [
+      ["기본 시간대", sch.active_hours || "항상"], ["오늘", sch.today ? (sch.today.kind === "off" ? "쉬는 날" : `${sch.today.spec || "종일"}${sch.today.kind === "override" ? " (지정)" : ""}`) : "-"],
+      ["지금", sch.in_window ? `<span class="c-good">작동 중 · ${sch.minutes_until_end == null ? "" : sch.minutes_until_end + "분 남음"}</span>` : `<span class="c-muted">비활성${sch.next_window_start ? " · 다음 " + fmtTs(sch.next_window_start).slice(5, 16) : ""}</span>`],
+      ["자동 머지", sch.merge_at || "안 함"], ["날짜별 예외", `${Object.keys(sch.calendar || {}).length}일`], ["종료 전 중단", `${sch.no_new_work_minutes_before_end}분`], ["폴링", `${sch.poll_seconds}s`],
+    ].map(([k, v]) => `<span>${esc(k)} <b>${v}</b></span>`).join("");
+    $("#sched-open").disabled = !c.config_writable;
+    const ap = o.approval || { default: "auto", repos: {} };
+    $("#appr-default").innerHTML = `<span class="muted">기본 승인 모드</span> ` + ["auto", "manual"].map((m) => `<button class="btn sm ${ap.default === m ? "primary" : ""}" data-appr-default="${m}" ${c.config_writable ? "" : "disabled"} title="${m === "auto" ? "제안이 바로 todo — 사람 승인 없이 진행" : "proposed 로 두고 사람이 승인"}">${m === "auto" ? "자동(승인 불필요)" : "수동(사람 승인)"}</button>`).join("") + (Object.keys(ap.repos || {}).length ? ` <span class="muted">예외: ${esc(Object.entries(ap.repos).map(([k, v]) => `${k}=${v === "auto" ? "자동" : "수동"}`).join(", "))}</span>` : "");
+    $$("#appr-default button").forEach((b) => b.addEventListener("click", async () => { try { await api("/api/approval", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ mode: b.dataset.apprDefault }) }); toast(`기본 승인 모드 → ${b.dataset.apprDefault === "auto" ? "자동" : "수동"}`, true); refresh(); } catch (e) { toast(`변경 실패: ${e.message}`); } }));
     const f = $("#sched-form");
     if (document.activeElement && f.contains(document.activeElement)) { /* 편집 중이면 값 덮어쓰지 않음 */ } else {
-      f.active_hours.value = o.schedule.active_hours || "";
+      setDefaultHours(o.schedule.active_hours || "");
       f.merge_at.value = o.schedule.merge_at || "";
       f.no_new_work_minutes_before_end.value = o.schedule.no_new_work_minutes_before_end;
       f.poll_seconds.value = o.schedule.poll_seconds;
     }
-    $$("input,button", f).forEach((el) => (el.disabled = !c.config_writable));
+    $$("input,button", f).forEach((el) => { if (el.id !== "hours-always" && !el.closest(".trp")) el.disabled = !c.config_writable; });
+    $("#hours-always").disabled = !c.config_writable; hoursTrp.setDisabled(!c.config_writable || $("#hours-always").checked);
     const reqRow = (r, cancellable) => `<div class="req ${esc(r.status)}"><span class="ts">${fmtTs(r.finished_at || r.started_at || r.requested_at).slice(5)}</span><span class="act">${esc(r.status)} · ${esc(ACTION_KO[r.action] || r.action)}${r.ticket ? " " + esc(r.ticket) : ""}</span><span class="detail" title="${esc(r.detail || "")}"><a href="#" data-open-repo="${esc(r.repo)}">${esc(r.repo)}</a>${r.detail ? " — " + esc(r.detail) : ""}</span><span>${cancellable && r.status === "pending" ? `<button class="btn sm" data-cancel="${esc(r.id)}">취소</button>` : ""}</span></div>`;
     $("#req-pending").innerHTML = (c.pending || []).length ? c.pending.map((r) => reqRow(r, true)).join("") : `<div class="empty">대기 중인 요청이 없습니다.</div>`;
     $("#req-recent").innerHTML = (c.recent || []).length ? c.recent.map((r) => reqRow(r, false)).join("") : `<div class="empty">아직 처리된 요청이 없습니다.</div>`;
+    renderCalendar(o);
     $$("#req-pending button[data-cancel]").forEach((b) => b.addEventListener("click", () => cancelRequest(b.dataset.cancel)));
     $$("#req-pending a[data-open-repo], #req-recent a[data-open-repo]").forEach((a) => a.addEventListener("click", (ev) => { ev.preventDefault(); openRepo(a.dataset.openRepo); }));
   }
@@ -348,7 +485,7 @@
     const pal = palette();
     const totals = STATUSES.map((s) => o.totals[s] || 0);
     const sum = totals.reduce((a, b) => a + b, 0);
-    renderChart("status", $("#ch-status"), deep(baseChart("donut", 260), {
+    renderChart("status", $("#ch-status"), deep(baseChart("donut", 170), {
       series: totals, labels: STATUSES.map((s) => STATUS_KO[s]), colors: pal.status, stroke: { width: 2, colors: [pal.surface] },
       plotOptions: { pie: { donut: { size: "68%", labels: { show: true, name: { color: pal.text }, value: { color: pal.text, fontSize: "20px" }, total: { show: true, label: "전체", color: pal.muted, formatter: () => String(sum) } } } } },
       legend: { show: true },
@@ -356,22 +493,22 @@
 
     const targets = o.repos.filter((r) => r.fe_be_ok);
     const anyTickets = targets.some((r) => r.ticket_count);
-    renderChart("repos", $("#ch-repos"), deep(baseChart("bar", 260), {
+    renderChart("repos", $("#ch-repos"), deep(baseChart("bar", 170), {
       chart: { stacked: true }, colors: pal.status,
       series: STATUSES.map((s, i) => ({ name: STATUS_KO[s], data: targets.map((r) => r.counts?.[s] || 0) })),
       xaxis: { categories: targets.map((r) => r.name + (r.eligible ? "" : " (제외)")), labels: { style: { colors: pal.muted } } },
-      plotOptions: { bar: { horizontal: true, barHeight: "55%", borderRadius: 2 } }, stroke: { width: 1, colors: [pal.surface] },
+      plotOptions: { bar: { horizontal: true, barHeight: "55%", borderRadius: 4, borderRadiusApplication: "end", borderRadiusWhenStacked: "last" } }, stroke: { width: 2, colors: [pal.surface] },
     }), anyTickets ? null : "티켓이 있는 레포가 없습니다.");
 
     if (st) {
       const days = st.daily;
       const any = days.some((d) => d.PASS || d.FAIL || d.ERROR || d.merged);
-      renderChart("daily", $("#ch-daily"), dailyChart(days, pal), any ? null : "최근 14일 처리 기록이 없습니다.");
+      renderChart("daily", $("#ch-daily"), dailyChart(days, pal, 170), any ? null : "최근 14일 처리 기록이 없습니다.");
     }
   }
 
-  function dailyChart(days, pal) {
-    return deep(baseChart("line", 260), {
+  function dailyChart(days, pal, height = 260) {
+    return deep(baseChart("line", height), {
       chart: { stacked: true }, colors: [...pal.verdict, pal.merged],
       series: [
         { name: "QA PASS", type: "column", data: days.map((d) => d.PASS) }, { name: "QA FAIL", type: "column", data: days.map((d) => d.FAIL) },
@@ -379,8 +516,8 @@
       ],
       xaxis: { categories: days.map((d) => d.date.slice(5)), labels: { style: { colors: pal.muted }, rotate: -45, rotateAlways: false } },
       yaxis: { labels: { style: { colors: pal.muted }, formatter: (v) => (Number.isInteger(v) ? v : "") }, min: 0, forceNiceScale: true },
-      stroke: { width: [0, 0, 0, 2], curve: "straight" }, markers: { size: 0, hover: { size: 5 } },
-      plotOptions: { bar: { columnWidth: "55%", borderRadius: 2 } }, tooltip: { shared: true, intersect: false },
+      stroke: { width: [2, 2, 2, 2], colors: [pal.surface, pal.surface, pal.surface, pal.merged], curve: "straight" }, markers: { size: [0, 0, 0, 4], strokeWidth: 2, strokeColors: pal.surface, hover: { size: 7 } },
+      plotOptions: { bar: { columnWidth: "55%", borderRadius: 4, borderRadiusApplication: "end", borderRadiusWhenStacked: "last" } }, tooltip: { shared: true, intersect: false },
     });
   }
 
@@ -419,6 +556,7 @@
       r.paused ? badge("일시정지", "serious") : "",
       (r.pending_requests || []).length ? badge(`요청 대기: ${r.pending_requests.join(", ")}`) : "",
       r.fe_be_ok ? badge("FE·BE 확인", "good") : badge("FE/BE 미확인", "serious"),
+      r.fe_be_ok ? badge(r.approval === "auto" ? "승인 자동(불필요)" : "승인 수동(사람)", r.approval === "auto" ? "good" : "warn") : "",
       r.current_branch ? (r.on_base ? badge(`on ${r.base_branch}`, "good") : badge(`on ${r.current_branch}`, "warn")) : "",
       r.clean == null ? "" : r.clean ? badge("clean", "good") : badge("dirty · 건너뜀", "warn"),
       r.has_remote ? badge("origin") : badge("원격 없음", "serious"),
@@ -524,7 +662,7 @@
   async function openTicket(repo, id) {
     showTab("tickets");
     const box = $("#ticket-detail");
-    box.hidden = false;
+    openDialog(box);
     box.innerHTML = `<div class="empty">불러오는 중…</div>`;
     try {
       const t = await api(`/api/repos/${encodeURIComponent(repo)}/tickets/${encodeURIComponent(id)}`);
@@ -550,7 +688,7 @@
         ${t.diff_stat ? `<h3>변경 파일 (git diff --stat ${esc(t.branch)})</h3><pre class="doc">${esc(t.diff_stat)}</pre>` : ""}
         <h3>산출물</h3>
         ${t.artifacts.length ? `<div class="artifact-tabs" id="art-tabs">${t.artifacts.map((a) => `<button data-name="${esc(a.name)}" title="${a.source === "branch" ? "브랜치에서 읽음" : esc(a.mtime || "")}">${esc(a.name)}${a.source === "branch" ? " ⎇" : ""}</button>`).join("")}</div><pre class="doc" id="art-body">파일을 선택하세요.</pre>` : `<div class="empty">산출물이 아직 없습니다.</div>`}`;
-      $("#ticket-close").addEventListener("click", () => (box.hidden = true));
+      $("#ticket-close").addEventListener("click", () => box.close());
       bindActions($("#ticket-actions"));
       $("#ticket-repo-link").addEventListener("click", (ev) => { ev.preventDefault(); openRepo(t.repo); });
       $$("#art-tabs button").forEach((b) => b.addEventListener("click", async () => {
@@ -564,7 +702,7 @@
       const first = $("#art-tabs button[data-name='summary.md'], #art-tabs button[data-name='qa-report.md'], #art-tabs button");
       if (first) first.click();
       renderTicketTimeline(t);
-      box.scrollIntoView({ behavior: "smooth", block: "start" });
+      box.scrollTop = 0;
     } catch (err) {
       box.innerHTML = `<div class="c-crit">불러오기 실패: ${esc(err.message)}</div>`;
     }
@@ -587,13 +725,13 @@
     if (!t.events.length) { renderChart("t-timeline", el, {}, "단계 실행 기록이 없습니다."); return; }
     const series = STAGES.map((s, i) => ({
       name: STAGE_KO[s],
-      data: t.events.filter((ev) => ev.stage === s).map((ev) => { const end = new Date(String(ev.ts)).getTime(); return { x: `${STAGE_KO[s]} #${ev.iteration}`, y: [end - (ev.seconds || 0) * 1000, end] }; }),
+      data: t.events.filter((ev) => ev.stage === s).map((ev) => { const end = parseTs(ev.ts).getTime(); return { x: `${STAGE_KO[s]} #${ev.iteration}`, y: [end - (ev.seconds || 0) * 1000, end] }; }),
     })).filter((s) => s.data.length);
     renderChart("t-timeline", el, deep(baseChart("rangeBar", 240), {
       series, colors: STAGES.filter((s) => t.events.some((ev) => ev.stage === s)).map((s) => pal.stages[STAGES.indexOf(s)]),
       plotOptions: { bar: { horizontal: true, barHeight: "60%", borderRadius: 2, rangeBarGroupRows: true } },
-      xaxis: { type: "datetime", labels: { datetimeUTC: false, style: { colors: pal.muted }, format: "HH:mm" } },
-      tooltip: { x: { format: "HH:mm:ss" }, custom: ({ seriesIndex, dataPointIndex, w }) => { const d = w.config.series[seriesIndex].data[dataPointIndex]; return `<div style="padding:6px 10px">${esc(d.x)} · ${dur(Math.round((d.y[1] - d.y[0]) / 1000))}</div>`; } },
+      xaxis: { type: "datetime", labels: { style: { colors: pal.muted }, formatter: (v) => kstTime(v) } },
+      tooltip: { custom: ({ seriesIndex, dataPointIndex, w }) => { const d = w.config.series[seriesIndex].data[dataPointIndex]; return `<div style="padding:6px 10px">${esc(d.x)} · ${kstTime(d.y[0], true)} ~ ${kstTime(d.y[1], true)} KST · ${dur(Math.round((d.y[1] - d.y[0]) / 1000))}</div>`; } },
       legend: { show: false },
     }));
   }
@@ -649,7 +787,7 @@
       ["마지막 fleet 배포", r.last_deploy ? `${r.last_deploy.ok ? badge("성공", "good") : badge("실패", "crit")} ${fmtTs(r.last_deploy.at)} (${esc(r.last_deploy.source || "")})<pre class="doc" style="max-height:160px">${esc(r.last_deploy.detail || "")}</pre>` : "-"],
     ]);
     const ci = r.ci;
-    $("#r-ci-runs").innerHTML = ci ? (ci.ok ? `<h3>GitHub Actions 최근 실행 <a href="${esc(ci.web)}" target="_blank" rel="noopener">↗</a></h3>` + (ci.runs.length ? ci.runs.map((x) => `<div class="ci-run">${x.conclusion === "success" ? badge("success", "good") : x.status !== "completed" ? badge(x.status, "") : badge(x.conclusion || "?", "crit")} <a href="${esc(x.url)}" target="_blank" rel="noopener">${esc(x.name)}</a> <span class="muted">${esc(x.event)} · ${esc(x.sha)} · ${fmtTs((x.updated_at || "").replace("Z", "")).slice(0, 16)}</span></div>`).join("") : `<div class="muted">실행 기록 없음</div>`) : `<h3>GitHub Actions</h3><div class="muted">조회 실패: ${esc(ci.error || "")}</div>`) : "";
+    $("#r-ci-runs").innerHTML = ci ? (ci.ok ? `<h3>GitHub Actions 최근 실행 <a href="${esc(ci.web)}" target="_blank" rel="noopener">↗</a></h3>` + (ci.runs.length ? ci.runs.map((x) => `<div class="ci-run">${x.conclusion === "success" ? badge("success", "good") : x.status !== "completed" ? badge(x.status, "") : badge(x.conclusion || "?", "crit")} <a href="${esc(x.url)}" target="_blank" rel="noopener">${esc(x.name)}</a> <span class="muted">${esc(x.event)} · ${esc(x.sha)} · ${fmtTs(x.updated_at).slice(0, 16)}</span></div>`).join("") : `<div class="muted">실행 기록 없음</div>`) : `<h3>GitHub Actions</h3><div class="muted">조회 실패: ${esc(ci.error || "")}</div>`) : "";
   }
 
   // ---------- 타임라인 ----------
@@ -667,6 +805,264 @@
       setRows("timeline", ev);
     } catch (e) { toast(`타임라인 실패: ${e.message}`); }
   }
+
+  // ---------- 시간대 선택 컴포넌트 (24h 트랙 · 시작/종료 time 입력 · 프리셋 · 자정 넘김 안내) ----------
+  const PRESETS = [["오늘 밤 → 내일 새벽", "21:00-03:00"], ["밤샘", "22:00-06:00"], ["새벽", "01:00-08:00"], ["오전", "09:00-12:00"], ["낮", "09:00-18:00"], ["저녁", "18:00-00:00"]];
+  const hm = (min) => `${String(Math.floor(((min % 1440) + 1440) % 1440 / 60)).padStart(2, "0")}:${String(min % 60).padStart(2, "0")}`;
+  const toMin = (t) => { const m = /^(\d{1,2}):(\d{2})$/.exec(String(t || "").trim()); return m ? (Math.min(23, +m[1]) * 60 + Math.min(59, +m[2])) : null; };
+  const parseSpec = (spec) => { const m = /^\s*(\d{1,2}:\d{2})\s*-\s*(\d{1,2}:\d{2})\s*$/.exec(spec || ""); return m ? [toMin(m[1]), toMin(m[2])] : null; };
+  const durText = (s, e) => { const d = ((e - s) + 1440) % 1440 || 1440; return `${Math.floor(d / 60)}시간${d % 60 ? ` ${d % 60}분` : ""}`; };
+  function makeTimeRange(container, { value = "01:00-08:00", onChange } = {}) {
+    let [s, e] = parseSpec(value) || [60, 480];
+    container.innerHTML = `<div class="trp">
+      <div class="trp-row"><label>시작 <input type="time" class="trp-s" step="300"></label><span class="trp-arrow">→</span><label>종료 <input type="time" class="trp-e" step="300"></label><span class="trp-info"></span></div>
+      <div class="trp-track" title="클릭/드래그로 조정 · 종료를 시작보다 앞에 두면 다음 날 새벽까지 이어집니다">
+        <div class="night" style="left:0;width:${(6 / 24) * 100}%"></div><div class="night" style="left:${(22 / 24) * 100}%;right:0"></div>
+        <div class="trp-fill a"></div><div class="trp-fill b"></div><div class="trp-now"></div>
+        <button type="button" class="trp-handle s" aria-label="시작 시각"></button><button type="button" class="trp-handle e" aria-label="종료 시각"></button>
+        <div class="trp-ticks">${[0, 3, 6, 9, 12, 15, 18, 21, 24].map((h) => `<span style="left:${(h / 24) * 100}%">${h}</span>`).join("")}${[6, 12, 18].map((h) => `<span class="sep" style="left:${(h / 24) * 100}%"></span>`).join("")}</div>
+      </div>
+      <div class="trp-presets"><span>빠른 선택</span>${PRESETS.map(([n, v]) => `<button type="button" data-v="${v}">${n}<span class="m">${v}</span></button>`).join("")}</div>
+    </div>`;
+    const el = container.firstElementChild, inS = $(".trp-s", el), inE = $(".trp-e", el), track = $(".trp-track", el), fa = $(".trp-fill.a", el), fb = $(".trp-fill.b", el), hs = $(".trp-handle.s", el), he = $(".trp-handle.e", el), info = $(".trp-info", el), nowEl = $(".trp-now", el);
+    const pct = (m) => `${(m / 1440) * 100}%`;
+    function draw(fire = true) {
+      inS.value = hm(s); inE.value = hm(e);
+      hs.style.left = pct(s); he.style.left = pct(e); hs.dataset.label = hm(s); he.dataset.label = e === 0 ? "24:00" : hm(e);
+      const wrap = e <= s;
+      if (!wrap) { fa.style.left = pct(s); fa.style.width = pct(e - s); fb.style.display = "none"; }
+      else { fa.style.left = pct(s); fa.style.width = pct(1440 - s); fb.style.display = e > 0 ? "block" : "none"; fb.style.left = "0"; fb.style.width = pct(e); }
+      info.innerHTML = `<b>${durText(s, e)}</b>${wrap ? ` · <span class="wrap">자정 넘김</span> → 다음 날 ${e === 0 ? "24:00(자정)" : hm(e)} 종료` : ""}`;
+      $$(".trp-presets button", el).forEach((b) => b.classList.toggle("active", b.dataset.v === spec()));
+      const nowK = kstParts(new Date(Date.now() + state.skew)); nowEl.style.left = pct(+nowK.slice(11, 13) * 60 + +nowK.slice(14, 16));
+      if (fire && onChange) onChange(spec());
+    }
+    const spec = () => `${hm(s)}-${hm(e)}`;
+    const snap = (m) => Math.max(0, Math.min(1435, Math.round(m / 5) * 5));
+    function fromEvent(ev) { const r = track.getBoundingClientRect(); return snap(((ev.clientX - r.left) / r.width) * 1440); }
+    let drag = null;
+    const start = (which) => (ev) => { ev.preventDefault(); drag = which; track.setPointerCapture && track.setPointerCapture(ev.pointerId); };
+    hs.addEventListener("pointerdown", start("s")); he.addEventListener("pointerdown", start("e"));
+    track.addEventListener("pointerdown", (ev) => { if (ev.target === hs || ev.target === he) return; const m = fromEvent(ev); const ds = Math.min(Math.abs(m - s), 1440 - Math.abs(m - s)), de = Math.min(Math.abs(m - e), 1440 - Math.abs(m - e)); drag = ds <= de ? "s" : "e"; if (drag === "s") s = m; else e = m; draw(); track.setPointerCapture && track.setPointerCapture(ev.pointerId); });
+    track.addEventListener("pointermove", (ev) => { if (!drag) return; const m = fromEvent(ev); if (drag === "s") s = m; else e = m; draw(); });
+    const stop = () => { drag = null; };
+    track.addEventListener("pointerup", stop); track.addEventListener("pointercancel", stop);
+    const key = (which) => (ev) => { const step = ev.shiftKey ? 60 : 5; let d = 0; if (ev.key === "ArrowLeft" || ev.key === "ArrowDown") d = -step; if (ev.key === "ArrowRight" || ev.key === "ArrowUp") d = step; if (!d) return; ev.preventDefault(); if (which === "s") s = (s + d + 1440) % 1440; else e = (e + d + 1440) % 1440; draw(); };
+    hs.addEventListener("keydown", key("s")); he.addEventListener("keydown", key("e"));
+    inS.addEventListener("change", () => { const m = toMin(inS.value); if (m != null) { s = m; draw(); } });
+    inE.addEventListener("change", () => { const m = toMin(inE.value); if (m != null) { e = m; draw(); } });
+    $$(".trp-presets button", el).forEach((b) => b.addEventListener("click", () => { [s, e] = parseSpec(b.dataset.v); draw(); }));
+    draw(false);
+    return { get: spec, set(v) { const p = parseSpec(v); if (p) { [s, e] = p; draw(false); } }, setDisabled(d) { el.classList.toggle("disabled", !!d); }, crosses: () => e <= s, el };
+  }
+
+  // 기본 작동 시간대: 숨은 input(name=active_hours) ↔ 컴포넌트 ↔ '항상' 체크
+  const schedForm = $("#sched-form");
+  const hoursTrp = makeTimeRange($("#hours-trp"), { value: "01:00-08:00", onChange: (v) => { if (!$("#hours-always").checked) schedForm.active_hours.value = v; } });
+  $("#hours-always").addEventListener("change", (ev) => { hoursTrp.setDisabled(ev.target.checked); schedForm.active_hours.value = ev.target.checked ? "" : hoursTrp.get(); });
+  function setDefaultHours(spec) { const always = !spec; $("#hours-always").checked = always; hoursTrp.setDisabled(always); if (!always) hoursTrp.set(spec); schedForm.active_hours.value = spec || ""; }
+
+  // ---------- 날짜별 시간대 달력 ----------
+  const cal = { month: null, selected: new Set(), anchor: null, days: {}, today: null };
+  const WD = ["일", "월", "화", "수", "목", "금", "토"];
+  const KIND_KO = { default: "기본", override: "지정", off: "쉼", always: "종일" };
+  const ymd = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+  function renderCalendar(o) {
+    const sch = o.schedule, box = $("#cal");
+    if (!box) return;
+    cal.today = sch.today ? sch.today.date : kstToday();
+    cal.days = Object.fromEntries((sch.days || []).map((d) => [d.date, d]));
+    if (!cal.month) cal.month = cal.today.slice(0, 7);
+    const [y, m] = cal.month.split("-").map(Number);
+    $("#cal-title").textContent = `${y}년 ${m}월`;
+    $("#cal-today-note").textContent = sch.today ? `오늘 ${sch.today.kind === "off" ? "쉬는 날" : (sch.today.spec || "종일")}${sch.today.kind === "override" ? " (날짜 지정)" : ""}${sch.in_window ? " · 지금 작동 중" : sch.next_window_start ? ` · 다음 시작 ${fmtTs(sch.next_window_start).slice(5, 16)}` : ""}` : "";
+    const first = new Date(y, m - 1, 1), start = new Date(first); start.setDate(1 - first.getDay());
+    const cells = WD.map((w, i) => `<div class="wd ${i === 0 ? "sun" : i === 6 ? "sat" : ""}">${w}</div>`);
+    const nowDate = cal.today, activeDate = sch.in_window ? (sch.today && sch.today.kind !== "off" ? nowDate : null) : null;
+    for (let i = 0; i < 42; i++) {
+      const d = new Date(start); d.setDate(start.getDate() + i);
+      const key = ymd(d), info = cal.days[key] || { kind: sch.active_hours ? "default" : "always", spec: sch.active_hours || null };
+      const kind = sch.calendar && sch.calendar[key] ? (sch.calendar[key] === "off" ? "off" : "override") : info.kind;
+      const spec = sch.calendar && sch.calendar[key] && sch.calendar[key] !== "off" ? sch.calendar[key] : info.spec;
+      const cls = ["cal-day", `k-${kind}`, d.getMonth() !== m - 1 ? "other" : "", key < nowDate ? "past" : "", key === nowDate ? "today" : "", key === activeDate ? "now" : "", cal.selected.has(key) ? "selected" : ""].filter(Boolean).join(" ");
+      cells.push(`<div class="${cls}" data-date="${key}" title="${key} · ${KIND_KO[kind]}${spec ? " " + spec : ""}"><span class="n">${d.getDate()}</span><span class="sp">${kind === "off" ? "쉼" : kind === "always" ? "종일" : esc(spec || "")}</span></div>`);
+    }
+    // 전날 창이 자정을 넘으면 그 날 셀에 "↳ ~HH:MM" (전날에서 이어짐) 을 표시하고, 편집 중인 창이 자정을 넘으면 선택일의 다음 날을 점선으로 미리 보여 준다
+    const specOf = (key) => { const ov = sch.calendar && sch.calendar[key]; if (ov) return ov === "off" ? null : ov; const inf = cal.days[key]; return inf ? (inf.kind === "off" ? null : inf.spec) : (sch.active_hours || null); };
+    const editorCrossing = $("#cal-editor")["cal-mode"].value === "window" && calTrp && calTrp.crosses();
+    const previewNext = new Set(editorCrossing ? Array.from(cal.selected).map((k) => { const d = new Date(k + "T00:00:00"); d.setDate(d.getDate() + 1); return ymd(d); }) : []);
+    const tmp = document.createElement("div"); tmp.innerHTML = cells.join("");
+    $$(".cal-day", tmp).forEach((el) => {
+      const key = el.dataset.date, prev = new Date(key + "T00:00:00"); prev.setDate(prev.getDate() - 1);
+      const ps = parseSpec(specOf(ymd(prev)));
+      if (ps && ps[1] <= ps[0]) el.insertAdjacentHTML("afterbegin", `<span class="spill" title="전날 ${hm(ps[0])} 창이 이어짐">↳ ~${ps[1] === 0 ? "24:00" : hm(ps[1])}</span>`);
+      if (previewNext.has(key)) el.classList.add("spill-preview");
+    });
+    $("#cal-grid").innerHTML = tmp.innerHTML;
+    $$("#cal-grid .cal-day").forEach((el) => el.addEventListener("click", (ev) => {
+      const key = el.dataset.date;
+      if (ev.shiftKey && cal.anchor) {
+        const [a, b] = [cal.anchor, key].sort();
+        for (let d = new Date(a + "T00:00:00"); ymd(d) <= b; d.setDate(d.getDate() + 1)) cal.selected.add(ymd(d));
+      } else if (cal.selected.has(key) && !ev.ctrlKey && !ev.metaKey && cal.selected.size === 1) cal.selected.clear();
+      else { if (!ev.ctrlKey && !ev.metaKey && !ev.shiftKey && cal.selected.size > 1 && !cal.selected.has(key)) cal.selected.clear(); cal.selected.has(key) && (ev.ctrlKey || ev.metaKey) ? cal.selected.delete(key) : cal.selected.add(key); }
+      cal.anchor = key;
+      renderCalendar(state.overview);
+    }));
+    const sel = Array.from(cal.selected).sort();
+    const f = $("#cal-editor");
+    $("#cal-sel").textContent = sel.length === 0 ? "날짜를 선택하세요" : sel.length === 1 ? sel[0] : `${sel[0]} ~ ${sel[sel.length - 1]} (${sel.length}일)`;
+    $("#cal-apply").disabled = !sel.length || !(o.control && o.control.config_writable);
+    if (sel.length === 1 && cal.lastSingle !== sel[0]) {
+      cal.lastSingle = sel[0];
+      const cur = sch.calendar ? sch.calendar[sel[0]] : null;
+      f["cal-mode"].value = cur ? (cur === "off" ? "off" : "window") : "window";
+      if (cur && cur !== "off") calTrp.set(cur); else if (!f["cal-window"].value) calTrp.set(sch.active_hours || "09:00-18:00");
+      f["cal-window"].value = calTrp.get();
+    }
+    if (!sel.length) cal.lastSingle = null;
+    const mode = f["cal-mode"].value;
+    $("#cal-trp").hidden = mode !== "window";
+    calTrp.setDisabled(!(o.control && o.control.config_writable));
+    const span = $("#cal-span");
+    if (sel.length && mode === "window") {
+      const ps = parseSpec(calTrp.get()), first = sel[0], last = sel[sel.length - 1];
+      const nextDay = (k) => { const d = new Date(k + "T00:00:00"); d.setDate(d.getDate() + 1); return ymd(d); };
+      const one = (k) => ps[1] <= ps[0] ? `<b>${k.slice(5)} ${hm(ps[0])}</b> → <b>${nextDay(k).slice(5)} ${ps[1] === 0 ? "24:00" : hm(ps[1])}</b>` : `<b>${k.slice(5)} ${hm(ps[0])} → ${hm(ps[1])}</b>`;
+      span.innerHTML = (sel.length === 1 ? one(first) : `${one(first)} … ${one(last)} (${sel.length}일 각각)`) + ` · ${durText(ps[0], ps[1])}${ps[1] <= ps[0] ? " · 자정을 넘겨 다음 날 새벽까지 이어집니다 (달력의 점선 칸)" : ""}`;
+    } else if (sel.length && mode === "off") span.textContent = "선택한 날에는 새 작업 창을 열지 않습니다. 전날 밤에 시작된 창의 새벽 부분은 그대로 끝까지 진행됩니다.";
+    else if (sel.length) span.textContent = `선택한 날의 예외를 지우고 기본 시간대(${sch.active_hours || "항상"})를 따릅니다.`;
+    else span.textContent = "";
+  }
+  const calTrp = makeTimeRange($("#cal-trp"), { value: "21:00-03:00", onChange: (v) => { $("#cal-editor")["cal-window"].value = v; if (state.overview) renderCalendar(state.overview); } });
+  $$("#cal-editor input[name=cal-mode]").forEach((r) => r.addEventListener("change", () => state.overview && renderCalendar(state.overview)));
+  $("#sched-open").addEventListener("click", () => { openDialog($("#sched-dialog")); if (state.overview) renderCalendar(state.overview); });
+  $("#cal-prev").addEventListener("click", () => { const [y, m] = cal.month.split("-").map(Number); const d = new Date(y, m - 2, 1); cal.month = ymd(d).slice(0, 7); renderCalendar(state.overview); });
+  $("#cal-next").addEventListener("click", () => { const [y, m] = cal.month.split("-").map(Number); const d = new Date(y, m, 1); cal.month = ymd(d).slice(0, 7); renderCalendar(state.overview); });
+  $("#cal-today").addEventListener("click", () => { cal.month = null; renderCalendar(state.overview); });
+  $("#cal-editor").addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    const f = ev.target, mode = f["cal-mode"].value, win = f["cal-window"].value.trim();
+    const sel = Array.from(cal.selected);
+    if (!sel.length) return;
+    if (mode === "window" && !parseSpec(win)) { toast("시간대를 선택하세요"); return; }
+    const entries = Object.fromEntries(sel.map((d) => [d, mode === "off" ? "off" : mode === "window" ? win : null]));
+    try {
+      const r = await api("/api/calendar", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ entries }) });
+      toast(`${sel.length}일 저장 — ${mode === "off" ? "쉬는 날" : mode === "window" ? win : "기본 시간대로 되돌림"} (데몬은 다음 tick, cron 은 10분 안에 반영)`, true);
+      cal.selected.clear();
+      state.overview.schedule = r.schedule;
+      renderCalendar(state.overview);
+      refresh();
+    } catch (e) { toast(`달력 저장 실패: ${e.message}`); }
+  });
+
+  // ---------- 크루 룸 (3D 아바타 + 대화방) ----------
+  const ROLE_COLOR_VAR = { pm: "--series-1", designer: "--series-5", developer: "--series-2", qa: "--series-3", techlead: "--series-7" };
+  const ROLE_INITIAL = { pm: "PM", designer: "DS", developer: "DEV", qa: "QA", techlead: "TL" };
+  const ROLE_STATE_KO = { working: "작업 중", speaking: "발언 중", done: "완료", fail: "실패", idle: "대기" };
+  const CREW_STAGE_KO = { pm: "PRD", design: "디자인", dev: "구현", qa: "QA 검증", discover: "발굴", merge: "자동 머지" };
+  const roleColor = (key) => cssVar(ROLE_COLOR_VAR[key] || "--series-4") || "#888";
+  const crewRoom = () => state.crew.rooms.find((r) => r.name === state.crew.repo) || null;
+
+  function startCrew() {
+    const c = state.crew;
+    if (!c.es) {
+      const es = new EventSource("/api/crew/stream?tail=400");
+      c.es = es;
+      es.addEventListener("init", (ev) => {
+        const d = JSON.parse(ev.data);
+        c.rooms = d.rooms; c.messages = d.messages; c.daemon = d.daemon; c.ready = true;
+        if (!c.repo || !c.rooms.some((r) => r.name === c.repo)) c.repo = (c.rooms.find((r) => r.active) || c.rooms[0] || {}).name || "";
+        renderCrew(true);
+      });
+      es.addEventListener("messages", (ev) => {
+        const d = JSON.parse(ev.data);
+        c.rooms = d.rooms; c.daemon = d.daemon;
+        c.messages.push(...d.messages);
+        if (c.messages.length > 3000) c.messages.splice(0, c.messages.length - 3000);
+        if ($("#crew-follow").checked) { const act = c.rooms.find((r) => r.active); if (act && act.name !== c.repo) { c.repo = act.name; renderCrew(true); return; } }
+        renderCrew(false, d.messages);
+      });
+      es.onerror = () => { $("#crew-meta").textContent = "스트림 끊김 — 재연결 중…"; };
+      es.onopen = () => { if (c.ready) $("#crew-meta").textContent = ""; };
+    }
+    ensureCrewRoom3D();
+  }
+
+  function ensureCrewRoom3D() {
+    const c = state.crew, stage = $("#crew-stage");
+    if (c.room || !stage) return;
+    const mount = () => {
+      if (c.room || !window.CrewRoom) return;
+      try {
+        c.room = new window.CrewRoom(stage, { onSelect: (key) => { c.role = c.role === key ? "" : key; renderCrew(true); } });
+        $("#crew-fallback").hidden = true;
+        if (c.ready) renderCrew(true);
+      } catch (e) { showCrewFallback(`3D 화면을 초기화하지 못했습니다 (${e.message}). 대화방은 계속 동작합니다.`); }
+    };
+    if (window.CrewRoom) return mount();
+    window.addEventListener("crewroom-ready", mount, { once: true });
+    setTimeout(() => { if (!c.room && !window.CrewRoom) showCrewFallback("Three.js 를 CDN(jsDelivr) 에서 불러오지 못했습니다. 인터넷 연결을 확인하세요 — 아바타 대화방은 계속 동작합니다."); }, 8000);
+  }
+  function showCrewFallback(msg) { const f = $("#crew-fallback"); f.textContent = msg; f.hidden = false; }
+
+  function renderCrew(full, fresh = []) {
+    const c = state.crew, room = crewRoom();
+    // 레포 선택
+    const sel = $("#crew-repo");
+    const opts = c.rooms.map((r) => `<option value="${esc(r.name)}"${r.name === c.repo ? " selected" : ""}>${esc(r.name)}${r.active ? " ● 작업 중" : r.paused ? " ⏸" : ""}</option>`).join("");
+    if (sel.innerHTML !== opts) sel.innerHTML = opts || `<option value="">대상 레포 없음</option>`;
+    // 역할 칩
+    const roles = room ? room.roles : [];
+    $("#crew-roles").innerHTML = roles.map((r) => { const st = (room.status[r.key] || {}).state || "idle"; return `<button class="crew-chip ${st}${c.role === r.key ? " active" : ""}" data-role="${esc(r.key)}" style="--c:${roleColor(r.key)}" title="${esc(r.title)}${r.model ? " · " + esc(r.model) : ""}"><i></i>${esc(r.name_ko)} <span class="st">${ROLE_STATE_KO[st]}</span></button>`; }).join("")
+      + (c.role ? `<button class="crew-chip" data-role="">전체 보기</button>` : "");
+    $$("#crew-roles .crew-chip").forEach((b) => b.addEventListener("click", () => { c.role = b.dataset.role; renderCrew(true); }));
+    // 상태 줄
+    const d = c.daemon || {};
+    const daemonText = d.paused ? "일시정지" : d.status === "running" ? "실행 중" : d.status === "stale" ? "응답 없음" : "대기(미실행)";
+    $("#crew-status").innerHTML = room
+      ? `<span class="chip">데몬 ${esc(daemonText)}</span>${room.active ? `<span class="chip c-good">● ${esc(room.name)} 작업 중${room.ticket ? " · " + esc(room.ticket) : ""}${room.stage ? " · " + esc(CREW_STAGE_KO[room.stage] || room.stage) : ""}</span>` : `<span class="chip muted">${esc(room.name)} 대기 중</span>`}${room.paused ? `<span class="chip c-serious">레포 일시정지</span>` : ""}<span class="muted">조직 정의: ${esc((room.org_source || "templates/org.yaml").split("/").slice(-3).join("/"))}</span>`
+      : `<span class="muted">대상 레포가 없습니다 (fleet.yaml include/exclude 또는 FE/BE 탐지를 확인).</span>`;
+    $("#crew-meta").textContent = c.ready ? `${c.rooms.length}개 룸 · 메시지 ${c.messages.length}` : "불러오는 중…";
+    // 3D
+    if (c.room && room) {
+      c.room.setRoom({ name: room.name, roles: roles.map((r) => ({ ...r, color: roleColor(r.key) })), status: room.status, ticket: room.ticket, stage: room.stage, daemonText });
+      for (const m of fresh) {
+        if (m.repo !== room.name || m.role === "system") continue;
+        if (["answer", "proposal", "verdict_pass", "verdict_fail", "thought", "stage_start", "start"].includes(m.kind)) c.room.say(m.role, m.text, m.kind === "answer" ? 16000 : 7000);
+        else if (m.kind === "tool") c.room.say(m.role, m.text.slice(0, 90), 3500);
+        else if (m.kind === "error") c.room.say(m.role, m.text.slice(0, 160), 9000);
+      }
+    }
+    // 대화방
+    const box = $("#crew-chat");
+    const visible = c.messages.filter((m) => (!room || m.repo === room.name || m.repo == null) && (!c.role || m.role === c.role || m.role === "system"));
+    const roleMap = Object.fromEntries(roles.map((r) => [r.key, r]));
+    const html = (m, isNew) => {
+      if (m.role === "system") return `<div class="cm sys ${esc(m.kind)}${isNew ? " me-new" : ""}"><div class="tx">${m.ts ? `<span class="mono">${esc(m.ts.slice(11))}</span> ` : ""}${esc(m.text)}${m.repo && !room ? ` <span class="tag">${esc(m.repo)}</span>` : ""}</div></div>`;
+      const r = roleMap[m.role] || { name_ko: m.role, title: "" };
+      const long = m.text.length > 420 || m.text.split("\n").length > 9;
+      return `<div class="cm ${esc(m.kind)}${isNew ? " me-new" : ""}" data-id="${m.id}"><div class="av" style="--c:${roleColor(m.role)}" title="${esc(r.title)}">${esc(ROLE_INITIAL[m.role] || m.role.slice(0, 2).toUpperCase())}</div>
+        <div class="bd"><div class="hd"><b>${esc(r.name_ko)}</b><span>${esc(r.title)}</span>${m.ts ? `<span class="mono">${esc(m.ts.slice(11))}</span>` : ""}${m.ticket ? `<span class="tag">${esc(m.ticket)}</span>` : ""}${m.stage ? `<span class="tag">${esc(CREW_STAGE_KO[m.stage] || m.stage)}${m.iteration > 1 ? ` #${m.iteration}` : ""}</span>` : ""}</div>
+        <div class="tx${long ? " clamp" : ""}">${esc(m.text)}</div>${long ? `<button class="more">더 보기</button>` : ""}</div></div>`;
+    };
+    if (full || !box.childElementCount) {
+      box.innerHTML = visible.length ? visible.slice(-400).map((m) => html(m, false)).join("") : `<div class="empty">${c.ready ? "아직 대화가 없습니다. 데몬이 이 레포의 티켓을 처리하거나 발굴을 시작하면 역할별 발언이 여기에 쌓입니다." : "불러오는 중…"}</div>`;
+    } else {
+      const add = fresh.filter((m) => visible.includes(m));
+      if (add.length) {
+        if (box.querySelector(".empty")) box.innerHTML = "";
+        box.insertAdjacentHTML("beforeend", add.map((m) => html(m, true)).join(""));
+        while (box.childElementCount > 400) box.removeChild(box.firstElementChild);
+      }
+    }
+    $$("#crew-chat .more").forEach((b) => (b.onclick = () => { b.previousElementSibling.classList.remove("clamp"); b.hidden = true; }));
+    $("#crew-chat-count").textContent = `${visible.length}건${c.role ? ` · ${esc((roleMap[c.role] || {}).name_ko || c.role)} 만` : ""}`;
+    if ($("#crew-autoscroll").checked) box.scrollTop = box.scrollHeight;
+  }
+  $("#crew-repo").addEventListener("change", (e) => { state.crew.repo = e.target.value; state.crew.role = ""; $("#crew-follow").checked = false; renderCrew(true); });
+  $("#crew-chat").addEventListener("scroll", () => { const p = $("#crew-chat"); if (p.scrollHeight - p.scrollTop - p.clientHeight > 40) $("#crew-autoscroll").checked = false; });
 
   // ---------- 로그 ----------
   const logLineHtml = (l) => `<span class="ln ${l.ts ? l.level : "plain"}">${l.ts ? `<span class="ts">${esc(l.ts)}</span> ` : ""}${esc(l.msg)}</span>`;
@@ -702,7 +1098,7 @@
       renderOverview(o);
       const lsel = $("#l-repo"), cur = lsel.value;
       lsel.innerHTML = `<option value="">모든 레포</option>` + o.repos.filter((r) => r.fe_be_ok).map((r) => `<option${r.name === cur ? " selected" : ""}>${esc(r.name)}</option>`).join("");
-      $("#conn").textContent = `갱신 ${new Date().toLocaleTimeString("ko-KR", { hour12: false })}`;
+      $("#conn").textContent = `갱신 ${kstTime(Date.now(), true)}`;
       $("#conn").className = "pill ok";
       if (state.tab === "timeline") loadTimeline();
       if (state.tab === "repo" && state.repo) loadRepo(state.repo);
@@ -713,18 +1109,13 @@
     }
   }
   $("#refresh").addEventListener("click", refresh);
-  setInterval(() => { $("#clock").textContent = new Date().toLocaleString("ko-KR", { hour12: false }); }, 1000);
+  setInterval(() => { $("#clock").textContent = `${kstParts(new Date())} KST`; }, 1000);
   setInterval(refresh, REFRESH_MS);
   document.addEventListener("visibilitychange", () => { if (!document.hidden) refresh(); });
-  window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => {
-    destroyCharts();
-    Object.values(state.grids).forEach((g) => g.setGridOption("theme", gridTheme()));
-    if (state.overview) renderOverview(state.overview);
-    if (state.tab === "repo" && state.repoDetail) renderRepo(state.repoDetail);
-  });
+  window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", rethemeAll);
 
   const hash = location.hash.replace("#", "");
   if (hash.startsWith("repo=")) state.repo = decodeURIComponent(hash.slice(5));
   const initial = hash.startsWith("repo=") ? "repo" : hash;
-  refresh().then(() => showTab(["overview", "workflow", "repo", "tickets", "timeline", "logs"].includes(initial) ? initial : "overview"));
+  refresh().then(() => showTab(["overview", "workflow", "crew", "repos", "repo", "tickets", "timeline", "logs"].includes(initial) ? initial : "overview"));
 })();

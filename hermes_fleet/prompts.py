@@ -25,6 +25,9 @@ def render_frontend_guide(guide: dict | None) -> str:
             lines.append(f"  - npm: {item['npm']}")
         if item.get("cdn"):
             lines.append(f"  - CDN: {item['cdn']}")
+    if guide.get("quality"):
+        lines.append("### 화면 품질 기준 (디자이너가 수치로 명시하고 QA 가 채점한다)")
+        lines += [f"- {x}" for x in map(str, guide["quality"])]
     if guide.get("loading"):
         lines.append("### 도입 방식")
         lines += [f"- {x}" for x in map(str, guide["loading"])]

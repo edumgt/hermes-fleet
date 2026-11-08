@@ -1,0 +1,46 @@
+# Hermes Fleet 설정 템플릿 — `hermes-fleet init` 이 이 파일을 바탕으로 로컬 fleet.yaml 을 만든다 (fleet.yaml 은 gitignore, 환경마다 다름).
+# root: 비우면 hermes-fleet 폴더의 상위 디렉터리를 스캔한다 → 어디에 클론해도 같은 위치의 다른 git 저장소가 후보가 된다.
+#       절대 경로나 fleet.yaml 기준 상대 경로도 가능.
+root: ""
+
+# 작동 시간대(KST). 이 시간 밖에서는 새 작업을 시작하지 않는다. 비우면 항상. 날짜별 예외는 calendar 에.
+active_hours: "01:00-08:00"
+no_new_work_minutes_before_end: 45
+# 하루 한 번 자동 머지 시각(QA PASS 브랜치 → 기준 브랜치, 검증 후 push). 비우면 안 함.
+merge_at: "07:30"
+poll_seconds: 600
+endpoint_retry_seconds: 60
+
+# 날짜별 작동 시간대 예외 (웹 모니터 달력에서 편집). "YYYY-MM-DD": "HH:MM-HH:MM" 또는 off
+calendar: {}
+
+# 사람 승인 모드. auto = 발굴 제안이 바로 todo 로 들어가 사람 승인 없이 진행 / manual = proposed 로 두고 사람이 승인. 레포별 예외는 repos 에.
+approval:
+  default: auto
+  repos: {}
+
+# 작업 대상: root 아래 git 저장소 중 프런트엔드(FE)와 백엔드(BE)가 모두 분명한 레포만 자동 선정.
+# include 가 비어 있지 않으면 그 목록 안에서만 고른다(init 이 채운다). exclude 는 항상 제외.
+include: []
+exclude: []
+
+# 레포별 오버라이드 (디렉터리 자동 탐지가 틀릴 때). 예:
+#   my-app:
+#     frontend: web          # FE 디렉터리
+#     backend: api           # BE 디렉터리
+#     base_branch: main
+#     deny: [infra/, .github/]          # 크루가 건드리면 안 되는 경로
+#     deploy: {target: aws-s3-cloudfront, trigger: manual, note: "수동 배포"}   # 워크플로 보드 표시용
+repos: {}
+
+discover:
+  max_proposals: 2        # 레포당 한 번 발굴에 제안할 최대 티켓 수
+  max_open_proposed: 4    # 승인 대기(또는 auto 모드에서 proposed+todo)가 이 수 이상이면 그 레포 발굴은 쉰다
+  cooldown_minutes: 180   # 같은 레포를 다시 발굴하기까지 최소 간격(분). 웹의 '발굴' 요청은 무시한다
+
+auto_merge:
+  verify: true
+  require_verification: true   # 실행 가능한 검증 단계(테스트/빌드)가 없는 레포는 자동 머지하지 않는다
+  verify_timeout: 900
+  push: true
+  delete_merged_branches: true

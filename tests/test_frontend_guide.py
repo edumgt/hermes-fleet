@@ -8,18 +8,18 @@ from hermes_fleet.discover import discover_prompt
 from hermes_fleet.org import load_org_for, load_template
 from hermes_fleet.repos import detect_profile
 
-KEYWORDS = ("AG Grid Community", "ApexCharts", "Lightweight Charts", "Tailwind", "Pretendard", "오프캔버스", "햄버거")
+KEYWORDS = ("AG Grid Community", "ApexCharts", "Lightweight Charts", "Tailwind", "Pretendard", "오프캔버스", "햄버거", "1920×1080", "모달 팝업")
 
 
 def test_template_guide_renders_with_all_stack_items():
     org = load_template()
     g = org["frontend_guide"]
-    assert [i["area"] for i in g["stack"]] == ["CSS", "폰트", "표", "레이아웃·내비게이션", "차트"]
+    assert [i["area"] for i in g["stack"]] == ["CSS", "폰트", "표", "레이아웃·내비게이션", "차트", "테마", "날짜·시간 표시", "화면 규격", "입출력"]
     text = prompts.render_frontend_guide(g)
     for k in KEYWORDS:
         assert k in text
     assert "ag-grid-community@34.2.0" in text and "apexcharts@4.7.0" in text and "lightweight-charts@5.2.1" in text and "pretendard@v1.3.9" in text
-    assert "### 도입 방식" in text and "### 검수 기준" in text
+    assert "### 도입 방식" in text and "### 검수 기준" in text and "### 화면 품질 기준" in text and "빈 띠" in text and "EDUMGT" in text and "data-theme" in text
     assert "ag-grid-enterprise" in text and "latest" in text
     assert "'VERDICT: FAIL' 의 근거" in text and "{" not in text   # YAML 매핑으로 잘못 파싱되지 않았는지
     assert prompts.render_frontend_guide(None) == "" and prompts.render_frontend_guide(False) == ""

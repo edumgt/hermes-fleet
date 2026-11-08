@@ -2,10 +2,11 @@
 #   scripts/monitor.sh up      # 빌드 + 기동 → http://localhost:8787
 #   scripts/monitor.sh down
 #
-# 호스트의 root(/home/ubuntu)를 컨테이너 안 같은 경로에 읽기 전용으로 마운트한다.
+# 호스트의 root(hermes-fleet 의 상위 폴더)를 컨테이너 안 같은 경로에 읽기 전용으로 마운트한다.
 # fleet.yaml 의 root, state/, logs/, 각 레포의 hermes/backlog·workspace·.git 을 그대로 읽기 위해 경로를 바꾸지 않는다.
 # hermes-fleet 디렉터리만 쓰기 가능으로 겹쳐 마운트한다 — 웹에서 레포 선택/해제가 fleet.yaml 의 include/exclude 를 고치기 위해서다.
-# 다른 위치에 설치했다면 .env 또는 셸에서 FLEET_ROOT / FLEET_DIR 를 지정한다.
+# 이 폴더에서 `docker compose up -d` 만 실행해도 된다: FLEET_DIR 기본값은 현재 폴더($PWD), FLEET_ROOT 기본값은 그 상위 폴더($PWD/..).
+# fleet.yaml 이 없으면(받은 직후) 모니터 컨테이너가 상위 폴더를 읽어 자동 init(fleet.yaml/.env 생성) 한다. 이미 있으면 그대로 쓴다.
 services:
   monitor:
     build:
@@ -17,10 +18,13 @@ services:
     ports:
       - "${MONITOR_BIND:-127.0.0.1}:${MONITOR_PORT:-8787}:8787"
     volumes:
-      - "${FLEET_ROOT:-/home/ubuntu}:${FLEET_ROOT:-/home/ubuntu}:ro"
-      - "${FLEET_DIR:-/home/ubuntu/hermes-fleet}:${FLEET_DIR:-/home/ubuntu/hermes-fleet}:rw"
+      - "${FLEET_ROOT:-${PWD}/..}:${FLEET_ROOT:-${PWD}/..}:ro"
+      - "${FLEET_DIR:-${PWD}}:${FLEET_DIR:-${PWD}}:rw"
     environment:
-      HERMES_FLEET_DIR: "${FLEET_DIR:-/home/ubuntu/hermes-fleet}"
+      HERMES_FLEET_DIR: "${FLEET_DIR:-${PWD}}"
+      # 자동 init: auto(기본) | skip. HERMES_INIT_ARGS 로 --provider/--base-url/--model/--include 등을 넘길 수 있다 (예: "--provider openai --base-url http://host.docker.internal:1234/v1")
+      HERMES_INIT: "${HERMES_INIT:-auto}"
+      HERMES_INIT_ARGS: "${HERMES_INIT_ARGS:-}"
       TZ: "${TZ:-Asia/Seoul}"
       # Windows 호스트의 Ollama. Docker Desktop 은 host.docker.internal 을 제공한다. 다른 곳이면 HERMES_BASE_URL 로 지정.
       OLLAMA_HOST: "${MONITOR_OLLAMA_HOST:-host.docker.internal:11434}"
@@ -34,3 +38,24 @@ services:
       - /tmp
     security_opt:
       - no-new-privileges:true
+
+  # FE 가이드 준수 측정 러너 (profile qa): scripts/monitor.sh qa → 모니터를 실제 Chromium 으로 열어 1920×1080/1366×768 에서
+  # 한 화면·여백·사이드바·모달 정중앙·테마·KST·푸터를 수치로 채점하고 qa/out/ 에 report.json + 스크린샷을 남긴다. 위반이 있으면 종료 코드 1.
+  playwright:
+    build:
+      context: .
+      dockerfile: docker/playwright.Dockerfile
+    image: hermes-fleet-playwright:local
+    profiles: ["qa"]
+    ipc: host
+    environment:
+      MONITOR_URL: "${QA_MONITOR_URL:-http://monitor:8787}"
+      QA_OUT: /qa/out
+      QA_STRICT_WIDTHS: "${QA_STRICT_WIDTHS:-1920}"
+      TZ: Asia/Seoul
+    volumes:
+      - "./qa:/qa:ro"
+      - "./qa/out:/qa/out:rw"
+    depends_on:
+      monitor:
+        condition: service_healthy

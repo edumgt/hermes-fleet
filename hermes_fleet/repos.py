@@ -59,6 +59,7 @@ class RepoProfile:
     reasons: list[str] = field(default_factory=list)   # 선정/제외 사유
     deny: tuple[str, ...] = ()                         # 에이전트 도구가 건드리면 안 되는 레포 내 경로 (fleet.yaml repos.<name>.deny)
     deploy: dict[str, Any] = field(default_factory=dict)   # fleet.yaml repos.<name>.deploy: {target, trigger: actions|fleet|manual|none, command, cwd, note}
+    approval: str = "auto"                              # 사람 승인 모드: auto(제안 → 바로 todo) | manual(proposed → 사람 승인). fleet.yaml approval 블록
 
     @property
     def eligible(self) -> bool:
@@ -260,6 +261,18 @@ def detect_profile(repo_root: Path, override: dict[str, Any] | None = None) -> R
 
 # ---------- fleet 설정 ----------
 
+APPROVAL_MODES = ("auto", "manual")
+
+
+def _approval_mode(value: Any, default: str) -> str:
+    v = str(value or "").strip().lower()
+    if v in ("", "default"):
+        return default
+    if v not in APPROVAL_MODES:
+        raise ValueError(f"approval 모드는 auto|manual 이어야 합니다: {value!r}")
+    return v
+
+
 @dataclass
 class FleetConfig:
     root: Path
@@ -268,28 +281,45 @@ class FleetConfig:
     merge_at: str | None = "07:30"
     poll_seconds: int = 600
     endpoint_retry_seconds: int = 60
+    calendar: dict[str, Any] = field(default_factory=dict)   # 날짜별 시간대 예외: {'2026-11-09': '13:00-18:00', '2026-11-10': 'off'}
     include: list[str] = field(default_factory=list)
     exclude: list[str] = field(default_factory=list)
     repos: dict[str, dict[str, Any]] = field(default_factory=dict)
     discover: dict[str, Any] = field(default_factory=lambda: {"max_proposals": 2, "max_open_proposed": 4})
     auto_merge: dict[str, Any] = field(default_factory=lambda: {"verify": True, "require_verification": True, "verify_timeout": 900, "push": True, "delete_merged_branches": True})
+    approval: dict[str, Any] = field(default_factory=lambda: {"default": "auto", "repos": {}})   # 사람 승인 모드 (기본 + 레포별 예외)
     source: Path | None = None          # 읽어 온 fleet.yaml 경로 (핫리로드용)
     source_mtime: float | None = None
 
     @classmethod
     def load(cls, path: Path) -> "FleetConfig":
         data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-        root = Path(str(data.get("root") or path.parent.parent)).expanduser()
+        raw_root = str(data.get("root") or "").strip()
+        if not raw_root:
+            root = path.resolve().parent.parent                       # 비우면 hermes-fleet 의 상위 폴더 (어디에 클론해도 형제 레포를 스캔)
+        else:
+            root = Path(raw_root).expanduser()
+            if not root.is_absolute():
+                root = (path.resolve().parent / root).resolve()         # 상대 경로는 fleet.yaml 위치 기준 (CWD 가 다른 컨테이너에서도 동일)
         cfg = cls(root=root, source=path, source_mtime=path.stat().st_mtime)
         for key in ("active_hours", "no_new_work_minutes_before_end", "merge_at", "poll_seconds", "endpoint_retry_seconds", "include", "exclude"):
             if key in data:
                 setattr(cfg, key, data[key])
         cfg.repos = data.get("repos") or {}
+        cfg.calendar = {str(k): ("off" if v is None or v is False else str(v)) for k, v in (data.get("calendar") or {}).items()}
         cfg.discover = {**cfg.discover, **(data.get("discover") or {})}
         cfg.auto_merge = {**cfg.auto_merge, **(data.get("auto_merge") or {})}
+        ap = data.get("approval") or {}
+        if isinstance(ap, str):
+            ap = {"default": ap}
+        cfg.approval = {"default": _approval_mode(ap.get("default"), "auto"), "repos": {str(k): _approval_mode(v, "auto") for k, v in (ap.get("repos") or {}).items()}}
         return cfg
 
-    RELOADABLE = ("include", "exclude", "repos", "active_hours", "merge_at", "no_new_work_minutes_before_end", "poll_seconds", "endpoint_retry_seconds", "discover", "auto_merge")
+    RELOADABLE = ("include", "exclude", "repos", "active_hours", "calendar", "merge_at", "no_new_work_minutes_before_end", "poll_seconds", "endpoint_retry_seconds", "discover", "auto_merge", "approval")
+
+    def approval_for(self, name: str) -> str:
+        """레포의 사람 승인 모드: repos 예외 → default."""
+        return self.approval.get("repos", {}).get(name) or self.approval.get("default") or "auto"
 
     def refresh(self) -> list[str]:
         """fleet.yaml 이 바뀌었으면 다시 읽어 바뀐 키 목록을 돌려준다(데몬이 돌고 있는 동안 웹/CLI 의 설정 변경을 반영). root 는 바꾸지 않는다."""
@@ -327,7 +357,9 @@ def scan_repos(cfg: FleetConfig) -> list[RepoProfile]:
             continue
         if not git.is_repo(child):
             continue
-        profiles.append(detect_profile(child, cfg.repos.get(child.name)))
+        prof = detect_profile(child, cfg.repos.get(child.name))
+        prof.approval = cfg.approval_for(child.name)
+        profiles.append(prof)
     return profiles
 
 

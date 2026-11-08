@@ -12,7 +12,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from ..fleetfile import FleetFileError
-from .collect import Collector, parse_log_line
+from .collect import Collector, parse_log_line, tail_lines
 
 
 class Selection(BaseModel):
@@ -26,6 +26,14 @@ class Paused(BaseModel):
 class RequestBody(BaseModel):
     action: str
     ticket: str | None = None
+
+
+class ApprovalBody(BaseModel):
+    mode: str   # auto | manual | default(레포 예외 삭제)
+
+
+class CalendarBody(BaseModel):
+    entries: dict[str, str | None]
 
 
 class ScheduleBody(BaseModel):
@@ -69,6 +77,24 @@ def create_app(collector: Collector | None = None) -> FastAPI:
         except PermissionError as exc:
             raise HTTPException(409, str(exc)) from exc
         except FleetFileError as exc:
+            raise HTTPException(400, str(exc)) from exc
+
+    @app.put("/api/repos/{name}/approval")
+    def repo_approval(name: str, body: ApprovalBody) -> dict[str, Any]:
+        try:
+            return col.set_repo_approval(name, body.mode)
+        except PermissionError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        except (ValueError, FleetFileError) as exc:
+            raise HTTPException(400, str(exc)) from exc
+
+    @app.put("/api/approval")
+    def default_approval(body: ApprovalBody) -> dict[str, Any]:
+        try:
+            return col.set_default_approval(body.mode)
+        except PermissionError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        except (ValueError, FleetFileError) as exc:
             raise HTTPException(400, str(exc)) from exc
 
     @app.put("/api/repos/{name}/pause")
@@ -117,6 +143,16 @@ def create_app(collector: Collector | None = None) -> FastAPI:
         except PermissionError as exc:
             raise HTTPException(409, str(exc)) from exc
         except FleetFileError as exc:
+            raise HTTPException(400, str(exc)) from exc
+
+    @app.put("/api/calendar")
+    def calendar(body: CalendarBody) -> dict[str, Any]:
+        """날짜별 시간대 예외 저장: entries = {"2026-11-09": "13:00-18:00", "2026-11-10": "off", "2026-11-11": null(삭제)}"""
+        try:
+            return col.update_calendar(body.entries)
+        except PermissionError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        except (FleetFileError, ValueError) as exc:
             raise HTTPException(400, str(exc)) from exc
 
     @app.get("/api/workflow")
@@ -169,6 +205,47 @@ def create_app(collector: Collector | None = None) -> FastAPI:
                 await asyncio.sleep(1.0)
 
         return StreamingResponse(gen(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+    @app.get("/api/crew")
+    def crew(repo: str | None = None, limit: int = Query(300, ge=1, le=3000)) -> dict[str, Any]:
+        return col.crew(repo or None, limit)
+
+    @app.get("/api/crew/stream")
+    async def crew_stream(request: Request, repo: str | None = None, tail: int = Query(300, ge=0, le=3000)) -> StreamingResponse:
+        """init: 스냅샷(rooms + 최근 메시지) → 이후 daemon.log 새 줄을 파서에 이어 넣어 'messages' 이벤트(새 메시지 + 갱신된 rooms)로 보낸다."""
+        async def gen():
+            offset = col.log_size()
+            parser = col.crew_parser()
+            lines, _ = tail_lines(col.paths.daemon_log, col.CREW_TAIL_LINES, col.CREW_TAIL_BYTES)
+            parser.feed(lines)
+            snap = col.crew(repo or None, tail, parser=parser)
+            yield "event: init\ndata: " + json.dumps(snap, ensure_ascii=False) + "\n\n"
+            idle = 0
+            while not await request.is_disconnected():
+                offset, new = await asyncio.to_thread(col.log_read_from, offset)
+                if new:
+                    idle = 0
+                    fresh = parser.feed(new)
+                    if repo:
+                        fresh = [m for m in fresh if m["repo"] in (repo, None)]
+                    snap = col.crew(repo or None, 0, parser=parser)
+                    yield "event: messages\ndata: " + json.dumps({"messages": fresh, "rooms": snap["rooms"], "daemon": snap["daemon"], "now": snap["now"]}, ensure_ascii=False) + "\n\n"
+                else:
+                    idle += 1
+                    if idle % 15 == 0:
+                        yield ": keepalive\n\n"
+                await asyncio.sleep(1.0)
+
+        return StreamingResponse(gen(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+    @app.middleware("http")
+    async def no_heuristic_cache(request: Request, call_next):
+        """정적 파일(index/app.js/style.css/crew3d.js)에 Cache-Control 이 없으면 브라우저가 Last-Modified 기반으로 며칠씩 캐시해
+        새 배포 뒤에도 옛 CSS/JS 가 남는다(달력이 세로로 늘어진 화면). 매번 재검증(ETag → 304)하게 한다."""
+        response = await call_next(request)
+        if not request.url.path.startswith("/api/"):
+            response.headers["Cache-Control"] = "no-cache"
+        return response
 
     app.mount("/", StaticFiles(directory=str(STATIC_DIR), html=True), name="static")
     return app

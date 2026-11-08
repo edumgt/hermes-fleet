@@ -26,7 +26,7 @@ from .merge import MergeConfig, MergeReport, auto_merge
 from .org import load_org_for
 from .pipeline import Pipeline, PipelineAborted
 from .repos import FleetConfig, RepoProfile, eligible_repos
-from .schedule import can_start_work, is_active, parse_clock, parse_window
+from .schedule import Schedule, parse_clock
 from .settings import PAUSE_FILE, STATE_DIR, Settings
 from .tools import git
 from .workflow import run_deploy
@@ -106,7 +106,7 @@ class FleetDaemon:
         self.sleep = sleep
         self.repos = repos
         self.now = now
-        self.window = parse_window(cfg.active_hours)
+        self.schedule = Schedule(cfg.active_hours, cfg.calendar)
         self.merge_time = parse_clock(cfg.merge_at)
         self.processed = 0
         self.merge_cfg = MergeConfig.from_dict(cfg.auto_merge)
@@ -156,7 +156,7 @@ class FleetDaemon:
         self._refresh_config()
         if rq.next_pending(self.state_dir) is not None:
             return False
-        return not is_active(self.now().time(), self.window)
+        return not self.schedule.is_active(self.now())
 
     def _run_on_demand(self) -> int:
         """웹/CLI 요청만 처리하고 종료. 요청이 없으면 아무 로그도 남기지 않는다(2분마다 돌아도 조용하도록)."""
@@ -182,7 +182,7 @@ class FleetDaemon:
         if self.pause_file.exists():
             if self.options.on_demand:
                 return "stop"
-            if self.options.exit_outside_window and not is_active(self.now().time(), self.window):
+            if self.options.exit_outside_window and not self.schedule.is_active(self.now()):
                 return "stop"  # 일시정지 + 시간대 밖: 살아서 폴링할 이유가 없다
             self.log(f"[fleet] paused ({self.pause_file}); run `hermes-fleet resume`")
             return "wait"
@@ -196,7 +196,7 @@ class FleetDaemon:
         if self.options.on_demand:
             return "stop"
 
-        if not is_active(now.time(), self.window):
+        if not self.schedule.is_active(now):
             return "stop" if self.options.exit_outside_window else "wait"
 
         profiles = self._targets()
@@ -210,7 +210,7 @@ class FleetDaemon:
                 self._run_merge(p)
                 return "work"
 
-        if not can_start_work(now.time(), self.window, int(self.cfg.no_new_work_minutes_before_end)):
+        if not self.schedule.can_start_work(now, int(self.cfg.no_new_work_minutes_before_end)):
             self.log(f"[fleet] within {self.cfg.no_new_work_minutes_before_end} min of window end; not starting new work")
             return "wait"
 
@@ -223,10 +223,11 @@ class FleetDaemon:
         fleet_state = load_state(self.fleet_state_path())
         ordered = rotate(profiles, fleet_state.get("cursor"))
 
-        # 2) todo 티켓이 있는 첫 레포
+        # 2) todo 티켓이 있는 첫 레포 (approval=auto 레포는 proposed 를 먼저 자동 승인)
         for p in ordered:
             if not self._ready(p):
                 continue
+            self._auto_approve(p)
             state = load_state(self.repo_state_path(p.name))
             ticket = pick_next(load_tickets(p.backlog_dir), state)
             if ticket:
@@ -234,13 +235,15 @@ class FleetDaemon:
                 self._advance(fleet_state, p)
                 return "work"
 
-        # 3) 발굴
+        # 3) 발굴 — 새 제안이 없으면 다음 레포로 넘어가고, 모두 비면 대기한다. 같은 레포는 cooldown 동안 다시 발굴하지 않는다
+        #    (예전엔 빈 발굴도 'work' 로 돌아와 레포들을 쉼 없이 돌며 LLM 을 계속 호출했다).
         if self.options.discover:
             for p in ordered:
                 if self._ready(p) and self._should_discover(p):
-                    self._run_discover(p)
+                    created = self._run_discover(p)
                     self._advance(fleet_state, p)
-                    return "work"
+                    if created:
+                        return "work"
 
         self.log("[fleet] nothing to do in any repo (waiting for approvals/merges)")
         return "wait"
@@ -250,10 +253,10 @@ class FleetDaemon:
         changed = self.cfg.refresh()
         if not changed:
             return
-        self.window = parse_window(self.cfg.active_hours)
+        self.schedule = Schedule(self.cfg.active_hours, self.cfg.calendar)
         self.merge_time = parse_clock(self.cfg.merge_at)
         self.merge_cfg = MergeConfig.from_dict(self.cfg.auto_merge)
-        self.log(f"[fleet] fleet.yaml changed: {', '.join(changed)} (hours={self.cfg.active_hours} merge_at={self.cfg.merge_at} include={self.cfg.include} exclude={self.cfg.exclude})")
+        self.log(f"[fleet] fleet.yaml changed: {', '.join(changed)} (hours={self.cfg.active_hours} calendar={len(self.cfg.calendar)}일 merge_at={self.cfg.merge_at} include={self.cfg.include} exclude={self.cfg.exclude})")
 
     def _targets(self) -> list[RepoProfile]:
         self._refresh_config()
@@ -436,22 +439,57 @@ class FleetDaemon:
         if git.is_clean(p.root):
             git.checkout(p.base_branch, p.root)
 
+    # ---------- 승인 모드 ----------
+    def _auto_approve(self, p: RepoProfile) -> int:
+        """approval=auto 인 레포의 proposed 티켓을 todo 로 바꾸고 커밋한다. 바꾼 수를 돌려준다."""
+        if p.approval != "auto":
+            return 0
+        try:
+            tickets = [t for t in load_tickets(p.backlog_dir) if t.status == "proposed"]
+        except Exception:  # noqa: BLE001 — 깨진 티켓 파일은 티켓 처리 단계에서 보고된다
+            return 0
+        if not tickets:
+            return 0
+        for t in tickets:
+            t.set_status("todo")
+        ids = ", ".join(t.id for t in tickets)
+        git.commit_all(f"hermes(approve): auto-approve {len(tickets)} tickets ({ids})\n\napproval=auto — 사람 승인 없이 진행", p.root)
+        self.log(f"[fleet][{p.name}] approval=auto: auto-approved {len(tickets)} proposed → todo ({ids})")
+        return len(tickets)
+
     # ---------- 발굴 ----------
     def _should_discover(self, p: RepoProfile) -> bool:
         limit = int(self.cfg.discover.get("max_open_proposed", 4))
-        open_proposed = [t for t in load_tickets(p.backlog_dir) if t.status == "proposed"]
-        if len(open_proposed) >= limit:
-            self.log(f"[fleet][{p.name}] {len(open_proposed)} proposals await approval (limit {limit}); skipping discover")
+        waiting = ("proposed",) if p.approval == "manual" else ("proposed", "todo")   # auto 모드는 아직 손대지 않은 todo 도 '쌓인 것'으로 센다
+        open_tickets = [t for t in load_tickets(p.backlog_dir) if t.status in waiting]
+        if len(open_tickets) >= limit:
+            self.log(f"[fleet][{p.name}] {len(open_tickets)} {'proposals await approval' if p.approval == 'manual' else 'tickets wait in backlog'} (limit {limit}); skipping discover")
             return False
+        cooldown = int(self.cfg.discover.get("cooldown_minutes", 180))
+        last = load_state(self.repo_state_path(p.name)).get("last_discover_at")
+        if cooldown > 0 and last:
+            try:
+                elapsed = (self.now() - dt.datetime.fromisoformat(last)).total_seconds() / 60
+            except ValueError:
+                elapsed = float("inf")
+            if elapsed < cooldown:
+                return False   # 조용히 건너뜀 (10분마다 로그가 쌓이지 않도록)
         return True
 
     def _run_discover(self, p: RepoProfile) -> list[Path]:
         self.log(f"[fleet][{p.name}] ▶ discover (Tech Lead)")
+        state = load_state(self.repo_state_path(p.name))
+        state["last_discover_at"] = self.now().strftime("%Y-%m-%dT%H:%M:%S")
+        save_state(state, self.repo_state_path(p.name))
         ensure_scaffold(p)
-        created = run_discover(p, self.settings, max_proposals=int(self.cfg.discover.get("max_proposals", 2)), log=self.log)
+        auto = p.approval == "auto"
+        created = run_discover(p, self.settings, max_proposals=int(self.cfg.discover.get("max_proposals", 2)), log=self.log, status="todo" if auto else "proposed")
         if created or not git.is_clean(p.root):
             names = ", ".join("-".join(c.stem.split("-")[:2]) for c in created) or "scaffold"
-            git.commit_all(f"hermes(discover): propose {len(created)} tickets ({names})\n\nstatus: proposed — 사람 승인 필요 (hermes-fleet approve {p.name} <ID>)", p.root)
+            note = "status: todo — approval=auto, 사람 승인 없이 진행" if auto else f"status: proposed — 사람 승인 필요 (hermes-fleet approve {p.name} <ID>)"
+            git.commit_all(f"hermes(discover): propose {len(created)} tickets ({names})\n\n{note}", p.root)
+            if auto and created:
+                self.log(f"[fleet][{p.name}] approval=auto: {len(created)} tickets go straight to todo")
             self.log(f"[fleet][{p.name}] ■ proposed {len(created)} tickets")
         else:
             self.log(f"[fleet][{p.name}] ■ discover produced no new tickets")

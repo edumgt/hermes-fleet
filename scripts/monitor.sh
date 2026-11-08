@@ -8,10 +8,14 @@
 #   scripts/monitor.sh local     Docker 없이 uv 가상환경으로 실행 (uv sync 필요)
 #   scripts/monitor.sh demo      가짜 fleet(scripts/demo_fleet.py)으로 미리보기 컨테이너 기동 → http://localhost:8790
 #   scripts/monitor.sh demo-down 미리보기 컨테이너 제거
+#   scripts/monitor.sh qa        Playwright 로 FE 가이드 준수 측정 (qa/out/report.json + 스크린샷, 위반 시 종료 코드 1)
+#   scripts/monitor.sh qa-shell  Playwright 컨테이너 셸 (qa/ 스크립트 수동 실행)
 set -euo pipefail
 FLEET_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 export PATH="/root/.local/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
 cd "$FLEET_DIR"
+export FLEET_DIR
+export FLEET_ROOT="${FLEET_ROOT:-$(dirname "$FLEET_DIR")}"   # 호스트 root = hermes-fleet 상위 폴더 (fleet.yaml root 가 비어 있을 때의 기본과 같다)
 PORT="${MONITOR_PORT:-8787}"
 BIND="${MONITOR_BIND:-127.0.0.1}"
 
@@ -48,12 +52,23 @@ case "${1:-up}" in
   demo-down)
     docker rm -f hermes-fleet-monitor-demo
     ;;
+  qa)
+    shift || true
+    mkdir -p "$FLEET_DIR/qa/out"
+    docker compose up -d --build monitor >/dev/null
+    docker compose --profile qa build -q playwright
+    docker compose --profile qa run --rm playwright "$@"
+    ;;
+  qa-shell)
+    docker compose --profile qa build -q playwright
+    docker compose --profile qa run --rm --entrypoint bash playwright
+    ;;
   local)
     shift || true
     exec uv run --project "$FLEET_DIR" --directory "$FLEET_DIR" python -m hermes_fleet.monitor --host "$BIND" --port "$PORT" "$@"
     ;;
   *)
-    echo "usage: $0 {up|down|restart|logs|status|local|demo|demo-down}" >&2
+    echo "usage: $0 {up|down|restart|logs|status|local|demo|demo-down|qa|qa-shell}" >&2
     exit 2
     ;;
 esac

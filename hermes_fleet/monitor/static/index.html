@@ -5,87 +5,140 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Hermes Fleet Monitor</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='14' fill='%233987e5'/%3E%3Cpath d='M9 17l5 5 9-11' stroke='white' stroke-width='3.5' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
-<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/variable/pretendardvariable-dynamic-subset.min.css">
+<link rel="stylesheet" href="style.css?v=20261108r">
+<!-- Tailwind CSS v4 (정적 HTML 전용 Play CDN, 버전 고정). 셸(햄버거 + 오프캔버스 LNB)·새 컴포넌트는 Tailwind 유틸리티로 쓴다. 기존 CSS 변수는 @theme 으로 매핑. -->
+<script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4.3.5"></script>
+<style type="text/tailwindcss">
+@theme {
+  --color-surface: var(--surface); --color-surface-2: var(--surface-2); --color-bg: var(--bg);
+  --color-ink: var(--text); --color-ink-2: var(--text-2); --color-muted: var(--muted); --color-line: var(--border);
+  --color-accent: var(--accent); --color-good: var(--good); --color-critical: var(--critical); --color-serious: var(--serious);
+  --font-sans: "Pretendard Variable", Pretendard, -apple-system, BlinkMacSystemFont, system-ui, Roboto, "Helvetica Neue", "Segoe UI", "Apple SD Gothic Neo", "Noto Sans KR", sans-serif;
+  --spacing-lnb: 15rem;
+}
+</style>
 <script src="https://cdn.jsdelivr.net/npm/ag-grid-community@34.2.0/dist/ag-grid-community.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/apexcharts@4.7.0/dist/apexcharts.min.js"></script>
+<!-- 크루 룸 3D: Three.js 는 ES module 만 배포되므로 import map 으로 버전을 고정해 모듈로 불러온다 -->
+<script type="importmap">{"imports":{"three":"https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js","three/addons/":"https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/"}}</script>
+<script type="module" src="crew3d.js?v=20261108r"></script>
 </head>
-<body>
-<header class="top">
-  <div class="brand">
-    <span class="dot" id="daemon-dot"></span>
-    <h1>Hermes Fleet <span class="muted">Monitor</span></h1>
+<body class="group/shell" data-lnb="closed">
+<!-- 공통 셸(FE 가이드 참조 구현): 상단 바 왼쪽 사이드바 트리거 + 좌측 오프캔버스 LNB(유일한 1차 메뉴).
+     데스크톱(≥1024px): 펼침 248px ↔ 아이콘 레일 68px(툴팁) push 모드, 상태는 localStorage. 모바일: 시트(overlay, dim, Esc·바깥 클릭 닫힘, 포커스 트랩).
+     상태는 <body data-lnb="open|rail|sheet|closed"> 하나로 표현하고 Tailwind 의 group-data 변형으로 그린다. 단축키 Ctrl/⌘+B, Alt+M. -->
+<header class="top transition-[padding] duration-200 ease-out motion-reduce:transition-none">
+  <button id="lnb-toggle" type="button" class="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-line bg-transparent text-ink-2 transition-colors hover:bg-surface-2 hover:text-ink focus-visible:outline-2 focus-visible:outline-accent" aria-controls="lnb" aria-expanded="false" aria-label="메뉴 열기" title="사이드바 (Ctrl/⌘+B)">
+    <svg class="lg:hidden" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" ><path d="M4 6h16M4 12h16M4 18h16"/></svg><svg class="hidden lg:block" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" ><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M9 3v18"/></svg>
+  </button>
+  <div class="brand min-w-0 flex items-center gap-3">
+    <span class="brand-name hidden items-center gap-2 lg:flex" aria-label="Hermes Fleet"><span class="text-[14px] font-semibold tracking-tight">Hermes Fleet</span><span class="text-muted">/</span></span>
+    <h1 class="flex min-w-0 items-center gap-2 text-[16px] font-semibold tracking-tight"><span class="dot shrink-0" id="daemon-dot" title="데몬 상태"></span><span class="truncate" id="page-title" aria-live="polite">개요</span></h1>
+    <span class="hidden text-[12px] text-muted md:inline" id="page-sub"></span>
   </div>
-  <nav class="tabs" role="tablist">
-    <button class="tab active" data-tab="overview" role="tab">개요</button>
-    <button class="tab" data-tab="workflow" role="tab">워크플로</button>
-    <button class="tab" data-tab="repo" role="tab">레포 상세</button>
-    <button class="tab" data-tab="tickets" role="tab">티켓</button>
-    <button class="tab" data-tab="timeline" role="tab">타임라인</button>
-    <button class="tab" data-tab="logs" role="tab">로그</button>
-  </nav>
   <div class="top-right">
     <span id="clock" class="mono muted"></span>
-    <button id="refresh" class="ghost" title="지금 새로고침">↻</button>
+    <button id="refresh" class="ghost inline-flex h-8 w-8 items-center justify-center !p-0" title="지금 새로고침" aria-label="지금 새로고침"><svg class="ic" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" width="16" height="16"><path d="M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/></svg></button>
     <span id="conn" class="pill" title="자동 갱신 상태">연결 중</span>
   </div>
 </header>
+<div id="tw-probe" class="hidden" aria-hidden="true"></div>
+<div id="lnb-backdrop" class="fixed inset-0 z-30 bg-black/45 backdrop-blur-[1px] lg:hidden" hidden></div>
+<aside id="lnb" class="fixed inset-y-0 left-0 z-40 flex w-62 -translate-x-full flex-col overflow-hidden border-r border-line bg-surface text-ink shadow-2xl transition-[transform,width] duration-200 ease-out motion-reduce:transition-none lg:shadow-none group-data-[lnb=open]/shell:translate-x-0 group-data-[lnb=sheet]/shell:translate-x-0 group-data-[lnb=rail]/shell:w-17 group-data-[lnb=rail]/shell:translate-x-0" aria-label="주 메뉴" aria-hidden="true">
+  <div class="flex h-14 shrink-0 items-center gap-3 border-b border-line px-3 group-data-[lnb=rail]/shell:justify-center group-data-[lnb=rail]/shell:px-0">
+    <button type="button" class="grid h-8 w-8 shrink-0 place-items-center rounded-lg bg-accent text-white shadow-sm focus-visible:outline-2 focus-visible:outline-accent" id="lnb-brand" title="Hermes Fleet" aria-label="사이드바 펼치기"><svg class="ic" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" width="16" height="16" stroke-width="3"><path d="M9 17l5 5 9-11"/></svg></button>
+    <div class="min-w-0 leading-tight group-data-[lnb=rail]/shell:hidden"><div class="truncate text-[14px] font-semibold tracking-tight">Hermes Fleet</div><div class="truncate text-[11px] text-muted">멀티 레포 크루 하네스</div></div>
+    <button type="button" class="ml-auto grid h-8 w-8 place-items-center rounded-lg text-muted hover:bg-surface-2 hover:text-ink lg:hidden" data-lnb-close aria-label="메뉴 닫기"><svg class="ic" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" width="16" height="16"><path d="M18 6 6 18M6 6l12 12"/></svg></button>
+  </div>
+  <nav class="flex-1 overflow-y-auto overflow-x-hidden px-2 py-3" aria-label="화면 메뉴">
+    <div class="px-3 pb-1.5 text-[10.5px] font-semibold uppercase tracking-[.08em] text-muted group-data-[lnb=rail]/shell:hidden">화면</div>
+    <ul class="m-0 list-none space-y-0.5 p-0">
+      <li><button type="button" class="lnb-item relative flex w-full items-center gap-3 rounded-lg px-3 py-2 text-left text-[13.5px] text-ink-2 transition-colors duration-150 hover:bg-surface-2 hover:text-ink focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-accent aria-[current=page]:bg-accent/10 aria-[current=page]:text-ink aria-[current=page]:font-semibold group-data-[lnb=rail]/shell:mx-auto group-data-[lnb=rail]/shell:h-10 group-data-[lnb=rail]/shell:w-10 group-data-[lnb=rail]/shell:justify-center group-data-[lnb=rail]/shell:px-0" data-tab="overview" data-label="개요"><svg class="ic" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" ><rect x="3" y="3" width="7" height="9" rx="1.5"/><rect x="14" y="3" width="7" height="5" rx="1.5"/><rect x="14" y="12" width="7" height="9" rx="1.5"/><rect x="3" y="16" width="7" height="5" rx="1.5"/></svg><span class="lb truncate group-data-[lnb=rail]/shell:hidden">개요</span><span class="lnb-badge ml-auto rounded-full bg-accent/15 px-1.5 text-[10.5px] font-semibold leading-[18px] text-accent tabular-nums group-data-[lnb=rail]/shell:hidden" id="lnb-badge-overview" hidden></span></button></li>
+      <li><button type="button" class="lnb-item relative flex w-full items-center gap-3 rounded-lg px-3 py-2 text-left text-[13.5px] text-ink-2 transition-colors duration-150 hover:bg-surface-2 hover:text-ink focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-accent aria-[current=page]:bg-accent/10 aria-[current=page]:text-ink aria-[current=page]:font-semibold group-data-[lnb=rail]/shell:mx-auto group-data-[lnb=rail]/shell:h-10 group-data-[lnb=rail]/shell:w-10 group-data-[lnb=rail]/shell:justify-center group-data-[lnb=rail]/shell:px-0" data-tab="workflow" data-label="워크플로"><svg class="ic" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" ><circle cx="6" cy="6" r="3"/><circle cx="18" cy="18" r="3"/><path d="M6 9v3a3 3 0 0 0 3 3h6"/><path d="M12 15l3-3m-3 3l3 3"/></svg><span class="lb truncate group-data-[lnb=rail]/shell:hidden">워크플로</span></button></li>
+      <li><button type="button" class="lnb-item relative flex w-full items-center gap-3 rounded-lg px-3 py-2 text-left text-[13.5px] text-ink-2 transition-colors duration-150 hover:bg-surface-2 hover:text-ink focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-accent aria-[current=page]:bg-accent/10 aria-[current=page]:text-ink aria-[current=page]:font-semibold group-data-[lnb=rail]/shell:mx-auto group-data-[lnb=rail]/shell:h-10 group-data-[lnb=rail]/shell:w-10 group-data-[lnb=rail]/shell:justify-center group-data-[lnb=rail]/shell:px-0" data-tab="crew" data-label="크루 룸"><svg class="ic" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" ><circle cx="9" cy="7" r="4"/><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/><path d="M21 21v-2a4 4 0 0 0-3-3.87"/></svg><span class="lb truncate group-data-[lnb=rail]/shell:hidden">크루 룸</span><span class="lnb-live ml-auto h-2 w-2 rounded-full bg-good shadow-[0_0_0_3px_color-mix(in_srgb,var(--good)_25%,transparent)] group-data-[lnb=rail]/shell:hidden" id="lnb-live-crew" hidden title="작업 진행 중"></span></button></li>
+      <li><button type="button" class="lnb-item relative flex w-full items-center gap-3 rounded-lg px-3 py-2 text-left text-[13.5px] text-ink-2 transition-colors duration-150 hover:bg-surface-2 hover:text-ink focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-accent aria-[current=page]:bg-accent/10 aria-[current=page]:text-ink aria-[current=page]:font-semibold group-data-[lnb=rail]/shell:mx-auto group-data-[lnb=rail]/shell:h-10 group-data-[lnb=rail]/shell:w-10 group-data-[lnb=rail]/shell:justify-center group-data-[lnb=rail]/shell:px-0" data-tab="repos" data-label="레포 목록"><svg class="ic" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" ><path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/></svg><span class="lb truncate group-data-[lnb=rail]/shell:hidden">레포 목록</span></button></li>
+      <li><button type="button" class="lnb-item relative flex w-full items-center gap-3 rounded-lg px-3 py-2 text-left text-[13.5px] text-ink-2 transition-colors duration-150 hover:bg-surface-2 hover:text-ink focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-accent aria-[current=page]:bg-accent/10 aria-[current=page]:text-ink aria-[current=page]:font-semibold group-data-[lnb=rail]/shell:mx-auto group-data-[lnb=rail]/shell:h-10 group-data-[lnb=rail]/shell:w-10 group-data-[lnb=rail]/shell:justify-center group-data-[lnb=rail]/shell:px-0" data-tab="repo" data-label="레포 상세"><svg class="ic" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" ><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/><path d="M8 14h8M12 10v8"/></svg><span class="lb truncate group-data-[lnb=rail]/shell:hidden">레포 상세</span></button></li>
+      <li><button type="button" class="lnb-item relative flex w-full items-center gap-3 rounded-lg px-3 py-2 text-left text-[13.5px] text-ink-2 transition-colors duration-150 hover:bg-surface-2 hover:text-ink focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-accent aria-[current=page]:bg-accent/10 aria-[current=page]:text-ink aria-[current=page]:font-semibold group-data-[lnb=rail]/shell:mx-auto group-data-[lnb=rail]/shell:h-10 group-data-[lnb=rail]/shell:w-10 group-data-[lnb=rail]/shell:justify-center group-data-[lnb=rail]/shell:px-0" data-tab="tickets" data-label="티켓"><svg class="ic" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" ><path d="M2 9a3 3 0 0 1 0 6v2a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-2a3 3 0 0 1 0-6V7a2 2 0 0 0-2-2H4a2 2 0 0 0-2 2Z"/><path d="M13 5v2M13 17v2M13 11v2"/></svg><span class="lb truncate group-data-[lnb=rail]/shell:hidden">티켓</span><span class="lnb-badge ml-auto rounded-full bg-accent/15 px-1.5 text-[10.5px] font-semibold leading-[18px] text-accent tabular-nums group-data-[lnb=rail]/shell:hidden" id="lnb-badge-tickets" hidden></span></button></li>
+      <li><button type="button" class="lnb-item relative flex w-full items-center gap-3 rounded-lg px-3 py-2 text-left text-[13.5px] text-ink-2 transition-colors duration-150 hover:bg-surface-2 hover:text-ink focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-accent aria-[current=page]:bg-accent/10 aria-[current=page]:text-ink aria-[current=page]:font-semibold group-data-[lnb=rail]/shell:mx-auto group-data-[lnb=rail]/shell:h-10 group-data-[lnb=rail]/shell:w-10 group-data-[lnb=rail]/shell:justify-center group-data-[lnb=rail]/shell:px-0" data-tab="timeline" data-label="타임라인"><svg class="ic" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" ><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M12 7v5l4 2"/></svg><span class="lb truncate group-data-[lnb=rail]/shell:hidden">타임라인</span></button></li>
+      <li><button type="button" class="lnb-item relative flex w-full items-center gap-3 rounded-lg px-3 py-2 text-left text-[13.5px] text-ink-2 transition-colors duration-150 hover:bg-surface-2 hover:text-ink focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-accent aria-[current=page]:bg-accent/10 aria-[current=page]:text-ink aria-[current=page]:font-semibold group-data-[lnb=rail]/shell:mx-auto group-data-[lnb=rail]/shell:h-10 group-data-[lnb=rail]/shell:w-10 group-data-[lnb=rail]/shell:justify-center group-data-[lnb=rail]/shell:px-0" data-tab="logs" data-label="로그"><svg class="ic" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" ><path d="m4 17 6-6-6-6"/><path d="M12 19h8"/></svg><span class="lb truncate group-data-[lnb=rail]/shell:hidden">로그</span></button></li>
+    </ul>
+  </nav>
+  <div class="shrink-0 border-t border-line p-2">
+    <div class="flex items-center gap-3 rounded-lg px-3 py-1.5 text-xs text-ink-2 group-data-[lnb=rail]/shell:justify-center group-data-[lnb=rail]/shell:px-0" id="lnb-daemon" data-label="데몬 상태"><span class="dot shrink-0" id="lnb-daemon-dot"></span><span class="truncate group-data-[lnb=rail]/shell:hidden" id="lnb-daemon-text">데몬 상태 확인 중</span></div>
+    <button type="button" id="theme-toggle" class="lnb-item relative flex w-full items-center gap-3 rounded-lg px-3 py-2 text-left text-[13.5px] text-ink-2 transition-colors duration-150 hover:bg-surface-2 hover:text-ink focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-accent aria-[current=page]:bg-accent/10 aria-[current=page]:text-ink aria-[current=page]:font-semibold group-data-[lnb=rail]/shell:mx-auto group-data-[lnb=rail]/shell:h-10 group-data-[lnb=rail]/shell:w-10 group-data-[lnb=rail]/shell:justify-center group-data-[lnb=rail]/shell:px-0" data-label="테마" title="테마 전환 (시스템 → 라이트 → 다크)"><svg class="ic theme-sun" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" ><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/></svg><svg class="ic theme-moon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" ><path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/></svg><svg class="ic theme-auto" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" ><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/></svg><span class="lb truncate group-data-[lnb=rail]/shell:hidden" id="theme-label">테마: 시스템</span></button>
+    <button type="button" id="lnb-settings" class="lnb-item relative flex w-full items-center gap-3 rounded-lg px-3 py-2 text-left text-[13.5px] text-ink-2 transition-colors duration-150 hover:bg-surface-2 hover:text-ink focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-accent aria-[current=page]:bg-accent/10 aria-[current=page]:text-ink aria-[current=page]:font-semibold group-data-[lnb=rail]/shell:mx-auto group-data-[lnb=rail]/shell:h-10 group-data-[lnb=rail]/shell:w-10 group-data-[lnb=rail]/shell:justify-center group-data-[lnb=rail]/shell:px-0" data-label="스케줄 설정"><svg class="ic" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" ><path d="M21 4h-7M10 4H3M21 12h-9M8 12H3M21 20h-5M12 20H3M14 2v4M8 10v4M16 18v4"/></svg><span class="lb truncate group-data-[lnb=rail]/shell:hidden">스케줄 · 날짜별 시간대</span></button>
+    <div class="mt-1 flex items-center gap-3 rounded-lg px-3 py-2 group-data-[lnb=rail]/shell:justify-center group-data-[lnb=rail]/shell:px-0" data-label="사용자 root">
+      <span class="grid h-7 w-7 shrink-0 place-items-center rounded-full bg-accent/15 text-[11px] font-bold text-accent" aria-hidden="true">R</span>
+      <span class="min-w-0 truncate text-xs text-ink-2 group-data-[lnb=rail]/shell:hidden"><span id="lnb-user" class="font-semibold text-ink">root</span> <span class="text-muted">· 로컬 WSL</span></span>
+      <button type="button" id="lnb-collapse" class="ml-auto hidden h-7 w-7 shrink-0 place-items-center rounded-md text-muted hover:bg-surface-2 hover:text-ink lg:grid group-data-[lnb=rail]/shell:hidden" title="아이콘 레일로 접기" aria-label="아이콘 레일로 접기"><svg class="ic" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" width="16" height="16"><path d="m11 17-5-5 5-5M18 17l-5-5 5-5"/></svg></button>
+    </div>
+  </div>
+</aside>
 
-<main>
+<main class="transition-[padding] duration-200 ease-out motion-reduce:transition-none">
+  <div id="init-banner" class="init-banner" role="status" hidden>
+    <strong>초기화가 필요합니다.</strong> 이 환경에는 아직 fleet.yaml 이 없습니다. 아래는 상위 폴더를 읽기 전용으로 미리 본 것이며, 터미널에서 초기화하면 대상 레포·LLM 설정이 만들어집니다:
+    <code>scripts/init.sh</code> <span class="muted">(또는 <code>uv run hermes-fleet init</code>)</span>
+  </div>
   <!-- ===== 개요 ===== -->
   <section id="tab-overview" class="panel active">
     <div class="tiles" id="tiles"></div>
 
     <div class="grid three">
-      <div class="card chart-card">
+      <div class="card chart-card compact">
         <div class="card-head"><h2>티켓 상태 분포</h2><span class="muted" id="totals-sum"></span></div>
         <div class="chart" id="ch-status"></div>
       </div>
-      <div class="card chart-card">
+      <div class="card chart-card compact">
         <div class="card-head"><h2>레포별 티켓 상태</h2><span class="muted">대상 레포</span></div>
         <div class="chart" id="ch-repos"></div>
       </div>
-      <div class="card chart-card">
+      <div class="card chart-card compact">
         <div class="card-head"><h2>최근 14일 처리 결과</h2><span class="muted">QA 결과 · 머지 건수</span></div>
         <div class="chart" id="ch-daily"></div>
       </div>
     </div>
 
-    <div class="grid two">
+    <div class="grid two" id="ctl-grid">
       <div class="card">
         <div class="card-head"><h2>제어</h2><span class="muted" id="ctl-note"></span></div>
         <div class="ctl-row">
           <button id="ctl-pause-all" class="btn">⏸ 전체 일시정지</button>
           <span class="muted">일시정지 중에는 데몬이 새 작업·요청을 시작하지 않습니다(진행 중인 티켓은 마칩니다).</span>
         </div>
-        <form id="sched-form" class="sched">
-          <label>작동 시간대 <input name="active_hours" placeholder="01:00-08:00 (비우면 항상)"></label>
-          <label>자동 머지 시각 <input name="merge_at" placeholder="07:30 (비우면 안 함)"></label>
-          <label>종료 전 새 작업 중단(분) <input name="no_new_work_minutes_before_end" type="number" min="0"></label>
-          <label>폴링 주기(초) <input name="poll_seconds" type="number" min="10"></label>
-          <div class="sched-actions"><button type="submit" class="btn primary">스케줄 저장</button><span class="muted" id="sched-msg">fleet.yaml 에 저장되며 데몬은 다음 tick 에 반영합니다.</span></div>
-        </form>
+        <div class="ctl-row" id="appr-default"></div>
+        <div class="sched-summary" id="sched-summary"></div>
+        <div class="ctl-row"><button type="button" class="btn" id="sched-open">⚙ 스케줄 · 날짜별 시간대 편집</button><span class="muted">기본 시간대, 자동 머지 시각, 날짜별 예외(달력)를 모달에서 편집합니다.</span></div>
       </div>
       <div class="card">
         <div class="card-head"><h2>요청 큐</h2><span class="muted">웹/CLI 요청은 호스트 데몬(야간) 또는 2분마다 도는 on-demand 러너가 처리</span></div>
-        <div id="req-pending"></div>
+        <div id="req-pending" class="req-list"></div>
         <h3>최근 처리</h3>
-        <div id="req-recent"></div>
+        <div id="req-recent" class="req-list"></div>
       </div>
     </div>
 
-    <div class="card">
+
+    <details class="card more" id="more-details">
+      <summary>자세히 — 스케줄 · 현재 작업 · LLM 엔드포인트 · 설정</summary>
+      <div class="grid two">
+        <div class="card"><h2>스케줄</h2><dl class="kv" id="schedule-kv"></dl></div>
+        <div class="card"><h2>현재 작업</h2><div id="activity"></div></div>
+        <div class="card"><h2>LLM 엔드포인트</h2><dl class="kv" id="llm-kv"></dl></div>
+        <div class="card"><h2>설정</h2><dl class="kv" id="cfg-kv"></dl></div>
+      </div>
+    </details>
+  </section>
+
+  <!-- ===== 레포 목록 ===== -->
+  <section id="tab-repos" class="panel">
+    <div class="card repos-card">
       <div class="card-head">
         <h2>레포 목록 <span class="muted" id="repo-count"></span></h2>
         <span class="muted" id="repo-note">체크 = fleet 작업 대상(fleet.yaml include/exclude). 행을 클릭하면 작업 내역을 봅니다.</span>
       </div>
-      <div id="grid-repos" class="grid-box auto"></div>
-    </div>
-
-    <div class="grid two">
-      <div class="card"><h2>스케줄</h2><dl class="kv" id="schedule-kv"></dl></div>
-      <div class="card"><h2>현재 작업</h2><div id="activity"></div></div>
-      <div class="card"><h2>LLM 엔드포인트</h2><dl class="kv" id="llm-kv"></dl></div>
-      <div class="card"><h2>설정</h2><dl class="kv" id="cfg-kv"></dl></div>
+      <div id="grid-repos" class="grid-box repos"></div>
     </div>
   </section>
 
@@ -104,6 +157,31 @@
       </div>
       <div id="wf-summary" class="wf-summary"></div>
       <div id="wf-board" class="wf-board"></div>
+    </div>
+  </section>
+
+  <!-- ===== 크루 룸 (3D + 아바타 대화방) ===== -->
+  <section id="tab-crew" class="panel">
+    <div class="card crew-card">
+      <div class="toolbar crew-toolbar">
+        <select id="crew-repo" title="보고 싶은 레포의 크루 룸"></select>
+        <label class="chk" title="데몬이 작업 중인 레포로 자동 전환"><input type="checkbox" id="crew-follow" checked> 활동 레포 따라가기</label>
+        <span id="crew-roles" class="crew-roles"></span>
+        <span class="muted" id="crew-meta" style="margin-left:auto"></span>
+      </div>
+      <div class="crew-layout">
+        <div class="crew-stage-wrap">
+          <div id="crew-stage" class="crew-stage">
+            <div class="crew-fallback" id="crew-fallback" hidden></div>
+            <div class="crew-hint">드래그로 회전 · 휠로 확대 · 아바타 클릭 = 그 역할의 발언만 보기</div>
+          </div>
+          <div class="crew-status" id="crew-status"></div>
+        </div>
+        <div class="crew-chat-wrap">
+          <div class="crew-chat-head"><h2>아바타 대화방</h2><span class="muted" id="crew-chat-count"></span><label class="chk"><input type="checkbox" id="crew-autoscroll" checked> 따라가기</label></div>
+          <div id="crew-chat" class="crew-chat"></div>
+        </div>
+      </div>
     </div>
   </section>
 
@@ -175,7 +253,7 @@
       </div>
       <div id="grid-tickets" class="grid-box tall"></div>
     </div>
-    <div class="card" id="ticket-detail" hidden></div>
+    <dialog id="ticket-detail" class="modal xl" aria-label="티켓 상세"></dialog>
   </section>
 
   <!-- ===== 타임라인 ===== -->
@@ -201,7 +279,56 @@
   </section>
 </main>
 
+
+<!-- 스케줄 · 날짜별 시간대 편집 (중요 입력 → 모달) -->
+<dialog id="sched-dialog" class="modal lg" aria-labelledby="sched-dialog-title">
+  <div class="modal-head"><h2 id="sched-dialog-title">스케줄 · 날짜별 시간대</h2><span class="muted">fleet.yaml 에 저장 · 데몬은 다음 tick, cron 은 10분 안에 반영</span><button type="button" class="ghost close" data-close>닫기</button></div>
+  <div class="modal-body">
+        <form id="sched-form" class="sched">
+          <div class="sched-hours">
+            <span class="lb">기본 작동 시간대 <span class="muted">(달력에 예외가 없는 날)</span> <label class="chk"><input type="checkbox" id="hours-always"> 항상 작동(시간대 없음)</label></span>
+            <input type="hidden" name="active_hours">
+            <div id="hours-trp"></div>
+          </div>
+          <label>자동 머지 시각 <input name="merge_at" placeholder="07:30 (비우면 안 함)"></label>
+          <label>종료 전 새 작업 중단(분) <input name="no_new_work_minutes_before_end" type="number" min="0"></label>
+          <label>폴링 주기(초) <input name="poll_seconds" type="number" min="10"></label>
+          <div class="sched-actions"><button type="submit" class="btn primary">스케줄 저장</button><span class="muted" id="sched-msg">fleet.yaml 에 저장되며 데몬은 다음 tick 에 반영합니다.</span></div>
+        </form>
+        <div class="cal" id="cal">
+          <div class="cal-head">
+            <h3>날짜별 시간대 <span class="muted" id="cal-today-note"></span></h3>
+            <div class="cal-nav"><button type="button" class="ghost" id="cal-prev" title="이전 달">‹</button><strong id="cal-title"></strong><button type="button" class="ghost" id="cal-next" title="다음 달">›</button><button type="button" class="ghost" id="cal-today" title="이번 달로">오늘</button></div>
+          </div>
+          <div class="cal-grid" id="cal-grid"></div>
+          <div class="cal-legend"><span><i class="k-default"></i>기본 시간대</span><span><i class="k-override"></i>날짜 지정</span><span><i class="k-off"></i>쉬는 날</span><span><i class="k-now"></i>지금 작동 중</span><span class="muted">클릭 = 선택 · Shift+클릭 = 범위 · 다시 클릭 = 해제</span></div>
+          <form class="cal-editor" id="cal-editor">
+            <div class="cal-editor-row">
+              <span class="cal-sel" id="cal-sel">날짜를 선택하세요</span>
+              <label class="chk"><input type="radio" name="cal-mode" value="window" checked> 시간대 지정</label>
+              <label class="chk"><input type="radio" name="cal-mode" value="off"> 쉬는 날</label>
+              <label class="chk"><input type="radio" name="cal-mode" value="default"> 기본 시간대로 되돌림</label>
+              <button type="submit" class="btn primary sm" id="cal-apply" disabled>선택한 날짜에 적용</button>
+            </div>
+            <input type="hidden" name="cal-window">
+            <div id="cal-trp"></div>
+            <div class="cal-span muted" id="cal-span"></div>
+          </form>
+        </div>
+  </div>
+</dialog>
+
+<!-- 확인 모달 (브라우저 confirm 대체) -->
+<dialog id="confirm-dialog" class="modal sm" aria-labelledby="confirm-title">
+  <form method="dialog">
+    <div class="modal-head"><h2 id="confirm-title">확인</h2></div>
+    <div class="modal-body"><p id="confirm-msg" style="margin:0"></p></div>
+    <div class="modal-actions"><button value="cancel" class="btn">취소</button><button value="ok" class="btn danger" id="confirm-ok">확인</button></div>
+  </form>
+</dialog>
+<!-- 전역 고정 푸터: 높이 10px, 검정, EDUMGT (FE 가이드 규정) -->
+<footer class="site-footer" role="contentinfo"><span>EDUMGT</span></footer>
 <div id="toast" class="toast" hidden></div>
-<script src="app.js"></script>
+<script src="app.js?v=20261108r"></script>
 </body>
 </html>

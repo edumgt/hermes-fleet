@@ -223,3 +223,141 @@ def update_schedule(path: Path, **fields: Any) -> dict[str, Any]:
         with path.open("w", encoding="utf-8") as fh:
             fh.write(new_text)
     return {"changed": new_text != text, **{k: data.get(k) for k in SCHEDULE_KEYS}}
+
+
+# ---------- 날짜별 시간대(calendar 블록) ----------
+
+_TOPLEVEL = re.compile(r"^[A-Za-z_][\w-]*:")
+_DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def _calendar_block(lines: list[str]) -> tuple[int, int] | None:
+    """`calendar:` 최상위 키 줄과 그 블록 끝(다음 최상위 키 직전) 인덱스. 없으면 None."""
+    for i, line in enumerate(lines):
+        if line.startswith("calendar:"):
+            j = i + 1
+            while j < len(lines) and (not lines[j].strip() or lines[j][:1].isspace() or lines[j].lstrip().startswith("#")):
+                j += 1
+            # 블록 끝의 빈 줄/주석은 블록 밖으로 돌려준다
+            while j - 1 > i and (not lines[j - 1].strip() or lines[j - 1].lstrip().startswith("#") and not lines[j - 1][:1].isspace()):
+                j -= 1
+            return i, j
+    return None
+
+
+def update_calendar(path: Path, entries: dict[str, Any]) -> dict[str, str]:
+    """calendar 블록을 통째로 다시 쓴다. entries: {date: 'HH:MM-HH:MM' | 'off' | None(삭제)}. 결과 = 저장된 calendar(spec 문자열)."""
+    from .schedule import OFF, parse_window  # noqa: WPS433
+
+    text = path.read_text(encoding="utf-8")
+    try:
+        data = yaml.safe_load(text) or {}
+    except yaml.YAMLError as exc:
+        raise FleetFileError(f"fleet.yaml 을 읽을 수 없습니다: {exc}") from exc
+    current: dict[str, str] = {str(k): ("off" if v is None or v is False else str(v).strip()) for k, v in (data.get("calendar") or {}).items()}
+    for key, value in entries.items():
+        day = str(key).strip()
+        if not _DATE.match(day):
+            raise FleetFileError(f"날짜 형식은 YYYY-MM-DD: {day!r}")
+        try:
+            import datetime as _dt
+            _dt.date.fromisoformat(day)
+        except ValueError as exc:
+            raise FleetFileError(f"유효하지 않은 날짜: {day}") from exc
+        if value is None or str(value).strip() == "":
+            current.pop(day, None)
+            continue
+        spec = str(value).strip()
+        if spec.lower() in ("off", "쉼", "휴무", "none", "x", "-"):
+            current[day] = OFF
+        else:
+            w = parse_window(spec)
+            current[day] = f"{w[0].hour:02d}:{w[0].minute:02d}-{w[1].hour:02d}:{w[1].minute:02d}"
+    block = ["calendar:"] + [f'  "{d}": {"off" if v == OFF else chr(34) + v + chr(34)}' for d, v in sorted(current.items())]
+    if not current:
+        block = ["calendar: {}"]
+    lines = text.splitlines()
+    found = _calendar_block(lines)
+    if found:
+        i, j = found
+        lines[i:j] = block
+    else:
+        if lines and lines[-1].strip():
+            lines.append("")
+        lines += ["# 날짜별 작동 시간대 예외(웹 모니터 달력에서 편집). 값은 'HH:MM-HH:MM' 또는 off(그 날은 쉼). 없는 날은 active_hours 를 따른다."] + block
+    new_text = "\n".join(lines) + "\n"
+    try:
+        check = yaml.safe_load(new_text) or {}
+    except yaml.YAMLError as exc:
+        raise FleetFileError(f"편집 결과가 유효한 YAML 이 아닙니다: {exc}") from exc
+    saved = {str(k): ("off" if v is None or v is False else str(v)) for k, v in (check.get("calendar") or {}).items()}
+    if saved != current:
+        raise FleetFileError(f"calendar 저장 결과가 일치하지 않습니다: {saved!r} != {current!r}")
+    if new_text != text:
+        with path.open("w", encoding="utf-8") as fh:
+            fh.write(new_text)
+    return current
+
+
+# ---------- 사람 승인 모드(approval 블록) ----------
+
+def _top_block(lines: list[str], key: str) -> tuple[int, int] | None:
+    for i, line in enumerate(lines):
+        if line.startswith(key + ":"):
+            j = i + 1
+            while j < len(lines) and (not lines[j].strip() or lines[j][:1].isspace() or lines[j].lstrip().startswith("#")):
+                j += 1
+            while j - 1 > i and (not lines[j - 1].strip() or lines[j - 1].lstrip().startswith("#") and not lines[j - 1][:1].isspace()):
+                j -= 1
+            return i, j
+    return None
+
+
+def update_approval(path: Path, default: str | None = None, repos: dict[str, str | None] | None = None) -> dict[str, Any]:
+    """approval 블록을 다시 쓴다. default: auto|manual, repos: {name: auto|manual|None(예외 삭제)}. 결과 = 저장된 approval."""
+    text = path.read_text(encoding="utf-8")
+    try:
+        data = yaml.safe_load(text) or {}
+    except yaml.YAMLError as exc:
+        raise FleetFileError(f"fleet.yaml 을 읽을 수 없습니다: {exc}") from exc
+    cur = data.get("approval") or {}
+    if isinstance(cur, str):
+        cur = {"default": cur}
+    cur_default = str(cur.get("default") or "auto").lower()
+    cur_repos = {str(k): str(v).lower() for k, v in (cur.get("repos") or {}).items()}
+    valid = ("auto", "manual")
+    if default is not None:
+        d = str(default).strip().lower()
+        if d not in valid:
+            raise FleetFileError("approval.default 는 auto|manual")
+        cur_default = d
+    for name, mode in (repos or {}).items():
+        if mode is None or str(mode).strip().lower() in ("", "default"):
+            cur_repos.pop(str(name), None)
+            continue
+        m = str(mode).strip().lower()
+        if m not in valid:
+            raise FleetFileError(f"approval 모드는 auto|manual: {name}={mode!r}")
+        cur_repos[str(name)] = m
+    block = ["approval:", f"  default: {cur_default}"] + (["  repos:"] + [f'    "{k}": {v}' for k, v in sorted(cur_repos.items())] if cur_repos else ["  repos: {}"])
+    lines = text.splitlines()
+    found = _top_block(lines, "approval")
+    if found:
+        i, j = found
+        lines[i:j] = block
+    else:
+        if lines and lines[-1].strip():
+            lines.append("")
+        lines += ["# 사람 승인 모드: auto = 제안이 바로 todo(승인 불필요) / manual = proposed 로 두고 사람이 승인. 웹 모니터에서 편집."] + block
+    new_text = "\n".join(lines) + "\n"
+    try:
+        check = yaml.safe_load(new_text) or {}
+    except yaml.YAMLError as exc:
+        raise FleetFileError(f"편집 결과가 유효한 YAML 이 아닙니다: {exc}") from exc
+    saved = check.get("approval") or {}
+    if str(saved.get("default")) != cur_default or {str(k): str(v) for k, v in (saved.get("repos") or {}).items()} != cur_repos:
+        raise FleetFileError("approval 저장 결과가 일치하지 않습니다")
+    if new_text != text:
+        with path.open("w", encoding="utf-8") as fh:
+            fh.write(new_text)
+    return {"default": cur_default, "repos": cur_repos}

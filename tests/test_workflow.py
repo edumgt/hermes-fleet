@@ -30,8 +30,8 @@ PAGES = "name: Pages\non:\n  push:\n    branches: [release]\njobs:\n  pages:\n  
 
 
 def test_parse_remote():
-    assert wf.parse_remote("https://github.com/edumgt/domain-rag-lab.git") == ("github", "https://github.com/edumgt/domain-rag-lab", "edumgt", "domain-rag-lab")
-    assert wf.parse_remote("git@github.com:edumgt/hermes-fleet.git") == ("github", "https://github.com/edumgt/hermes-fleet", "edumgt", "hermes-fleet")
+    assert wf.parse_remote("https://github.com/acme/web-shop.git") == ("github", "https://github.com/acme/web-shop", "acme", "web-shop")
+    assert wf.parse_remote("git@github.com:acme/hermes-fleet.git") == ("github", "https://github.com/acme/hermes-fleet", "acme", "hermes-fleet")
     assert wf.parse_remote("https://gitlab.com/a/b")[0] == "gitlab" and wf.parse_remote(None)[0] == "none" and wf.parse_remote("weird")[0] == "other"
 
 
@@ -151,7 +151,7 @@ def test_workflow_api(tmp_path: Path, node_python_repo: Path, monkeypatch):
     keys = [s["key"] for s in row["stages"]]
     assert keys == ["discover", "approve", "crew", "review", "merge", "push", "cicd", "deploy"] and row["reach"] == "deploy" and row["aws"]
     modes = {s["key"]: s["mode"] for s in row["stages"]}
-    assert modes["push"] == "auto" and modes["cicd"] == "auto" and modes["deploy"] == "actions" and modes["approve"] == "manual"
+    assert modes["push"] == "auto" and modes["cicd"] == "auto" and modes["deploy"] == "actions" and modes["approve"] == "auto"   # approval 기본값 auto
     dep = row["stages"][7]
     assert dep["status"] == "ok" and "CD — Deploy to EC2" in dep["detail"] and dep["can_request"] is False
     assert b["totals"] == {"targets": 1, "push": 1, "cicd": 1, "deploy_auto": 1, "aws": 1}

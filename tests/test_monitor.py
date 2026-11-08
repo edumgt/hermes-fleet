@@ -211,7 +211,7 @@ root: /r
 include: []
 exclude:
   - hermes-fleet
-  - msa-k8s-lab      # 사유 주석
+  - legacy-lab      # 사유 주석
 repos:
   a: {frontend: fe}
 """
@@ -221,12 +221,12 @@ def test_toggle_text_preserves_comments_and_validates():
     from hermes_fleet import fleetfile as ff
 
     out = ff.toggle_text(FLEET_YAML, "shop", False)
-    assert "  - msa-k8s-lab      # 사유 주석\n  - shop\n" in out and out.startswith("# 설정\n") and "repos:\n  a: {frontend: fe}" in out
+    assert "  - legacy-lab      # 사유 주석\n  - shop\n" in out and out.startswith("# 설정\n") and "repos:\n  a: {frontend: fe}" in out
     assert ff.toggle_text(out, "shop", False) == out                      # 멱등
     back = ff.toggle_text(out, "shop", True)
     assert back == FLEET_YAML                                             # 원복
-    sel = ff.toggle_text(FLEET_YAML, "msa-k8s-lab", True)
-    assert "msa-k8s-lab" not in sel and "  - hermes-fleet\n" in sel
+    sel = ff.toggle_text(FLEET_YAML, "legacy-lab", True)
+    assert "legacy-lab" not in sel and "  - hermes-fleet\n" in sel
 
     # exclude 가 비면 인라인 빈 목록으로, 다시 추가하면 블록으로
     one = "root: /r\nexclude:\n  - x\n"
@@ -349,3 +349,63 @@ def test_control_api(tmp_path: Path, node_python_repo: Path):
     client.put("/api/repos/shop/selection", json={"selected": False})
     assert client.post("/api/repos/shop/requests", json={"action": "run"}).status_code == 400
     assert client.post("/api/repos/shop/requests", json={"action": "stop"}).status_code == 200
+
+
+# ---------- 날짜별 시간대(달력) ----------
+
+def test_update_calendar_rewrites_block_and_keeps_rest(tmp_path: Path):
+    from hermes_fleet.fleetfile import update_calendar
+    from hermes_fleet.repos import FleetConfig
+    p = tmp_path / "fleet.yaml"
+    p.write_text("# 설정\nroot: /r\nactive_hours: \"01:00-08:00\"   # 기본\nexclude:\n  - a   # 사유\nauto_merge:\n  verify: true\n", encoding="utf-8")
+    saved = update_calendar(p, {"2026-11-10": "13:00-18:00", "2026-11-11": "off"})
+    assert saved == {"2026-11-10": "13:00-18:00", "2026-11-11": "off"}
+    text = p.read_text(encoding="utf-8")
+    assert "# 사유" in text and "# 기본" in text and 'calendar:\n  "2026-11-10": "13:00-18:00"\n  "2026-11-11": off\n' in text
+    cfg = FleetConfig.load(p)
+    assert cfg.calendar == {"2026-11-10": "13:00-18:00", "2026-11-11": "off"}
+    # 수정·삭제 → 블록만 바뀐다
+    saved = update_calendar(p, {"2026-11-10": None, "2026-11-12": "21:00-03:00"})
+    assert saved == {"2026-11-11": "off", "2026-11-12": "21:00-03:00"}
+    text2 = p.read_text(encoding="utf-8")
+    assert text2.count("calendar:") == 1 and "auto_merge:\n  verify: true" in text2 and "# 사유" in text2
+    with pytest.raises(Exception):
+        update_calendar(p, {"2026-13-40": "off"})
+    with pytest.raises(Exception):
+        update_calendar(p, {"2026-11-12": "25:00-26:00"})
+    update_calendar(p, {"2026-11-11": None, "2026-11-12": None})
+    assert "calendar: {}" in p.read_text(encoding="utf-8") and FleetConfig.load(p).calendar == {}
+
+
+def test_calendar_api_and_schedule_view(tmp_path: Path, node_python_repo: Path):
+    pytest.importorskip("fastapi")
+    from fastapi.testclient import TestClient
+
+    from hermes_fleet.monitor.app import create_app
+
+    paths = make_fleet(tmp_path, node_python_repo, STOPPED_LOG)
+    client = TestClient(create_app(collector(paths, now=dt.datetime(2026, 11, 8, 14, 0))))
+    s0 = client.get("/api/overview").json()["schedule"]
+    assert s0["in_window"] is False and s0["calendar"] == {} and s0["today"]["kind"] == "default"
+    r = client.put("/api/calendar", json={"entries": {"2026-11-08": "13:00-18:00", "2026-11-09": "off"}})
+    assert r.status_code == 200
+    s1 = r.json()["schedule"]
+    assert s1["in_window"] is True and s1["today"] == {"date": "2026-11-08", "kind": "override", "spec": "13:00-18:00"} and s1["minutes_until_end"] == 240
+    assert s1["calendar"] == {"2026-11-08": "13:00-18:00", "2026-11-09": "off"}
+    d = {x["date"]: x for x in s1["days"]}
+    assert d["2026-11-09"]["kind"] == "off" and d["2026-11-10"]["kind"] == "default" and d["2026-11-10"]["spec"] == "01:00-08:00"
+    o = client.get("/api/overview").json()
+    assert o["daemon"]["expected_running"] is True      # 오늘 예외 창 안인데 데몬이 stopped → 미실행 표시
+    assert client.put("/api/calendar", json={"entries": {"2026-11-08": "bad"}}).status_code == 400
+    assert client.put("/api/calendar", json={"entries": {"2026-11-08": None, "2026-11-09": None}}).json()["calendar"] == {}
+
+
+
+def test_monitor_without_config_reads_parent_and_flags_uninitialized(tmp_path: Path, node_python_repo: Path):
+    fleet = tmp_path / "hermes-fleet"
+    (fleet / "state").mkdir(parents=True); (fleet / "logs").mkdir()
+    (fleet / "fleet.example.yaml").write_text((Path(__file__).resolve().parent.parent / "fleet.example.yaml").read_text(encoding="utf-8"), encoding="utf-8")
+    col = collector(c.MonitorPaths(fleet_dir=fleet, config=fleet / "fleet.yaml"))
+    o = col.overview()
+    assert o["initialized"] is False and o["config_writable"] is False
+    assert node_python_repo.name in {r["name"] for r in o["repos"]}      # 템플릿 기본값으로 상위 폴더를 읽기 전용 스캔

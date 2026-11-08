@@ -1,7 +1,8 @@
-"""hermes-fleet CLI: repos / check / status / backlog / new / approve / run / discover / merge / daemon / pause / resume / init"""
+"""hermes-fleet CLI: init(환경 초기화) / repos / check / status / backlog / new / approve / run / discover / merge / daemon / pause / resume / scaffold"""
 from __future__ import annotations
 
 import argparse
+import re
 import sys
 import time
 from pathlib import Path
@@ -211,7 +212,47 @@ def cmd_daemon(args: argparse.Namespace) -> int:
     return FleetDaemon(cfg, opts).run()
 
 
-def cmd_init(args: argparse.Namespace) -> int:
+def cmd_init_env(args: argparse.Namespace) -> int:
+    """받은 환경에서 처음 실행: 형제 레포 스캔 → fleet.yaml/.env 생성 → LLM 점검 → 다음 단계."""
+    from .setup import init_environment, next_steps  # noqa: WPS433
+
+    fleet_dir = Path(args.fleet_dir) if args.fleet_dir else fleet_config_path().parent
+    include = [n for chunk in (args.include or []) for n in chunk.split(",") if n.strip()]
+    root = Path(args.root).expanduser() if args.root else None
+    if not include and not args.yes and sys.stdin.isatty():
+        # 대화형: 후보를 보여 주고 고르게 한다
+        from .repos import scan_repos as _scan  # noqa: WPS433
+        cands = [p for p in _scan(FleetConfig(root=(root or fleet_dir.parent).resolve())) if p.name != fleet_dir.name]
+        if cands:
+            print("대상 레포를 고르세요 (번호를 쉼표로, 비우면 FE+BE 가 탐지된 레포 전부, 'none' 이면 없음):")
+            for i, c in enumerate(cands, 1):
+                print(f"  {i:>2}. {'●' if c.eligible else '○'} {c.name:<28} {'; '.join(c.reasons)}")
+            try:
+                ans = input("> ").strip()
+            except EOFError:
+                ans = ""
+            if ans.lower() == "none":
+                args.yes = True; include = []; select_all = False
+            elif ans:
+                idx = [int(x) for x in re.split(r"[,\s]+", ans) if x.isdigit()]
+                include = [cands[i - 1].name for i in idx if 0 < i <= len(cands)]
+    select_all = not (locals().get("select_all") is False)
+    res = init_environment(fleet_dir, root=root, include=include or None, select_all=select_all, provider=args.provider, model=args.model,
+                           base_url=args.base_url, api_key=args.api_key, force=args.force, scaffold=args.scaffold)
+    if args.cron:
+        import subprocess  # noqa: WPS433
+
+        subprocess.run([str(fleet_dir / "scripts" / "install-cron.sh")], check=False)
+    print()
+    for n in res.notes:
+        print(f"⚠ {n}")
+    print("다음 단계:")
+    for st in next_steps(res):
+        print(f"  {st}")
+    return 0
+
+
+def cmd_scaffold(args: argparse.Namespace) -> int:
     cfg = _cfg(args)
     repos = [_repo(cfg, r) for r in args.repo] if args.repo else eligible_repos(cfg)
     for p in repos:
@@ -324,9 +365,19 @@ def build_parser() -> argparse.ArgumentParser:
     rqp.add_argument("--list", action="store_true")
     rqp.set_defaults(func=cmd_request)
 
-    i = sub.add_parser("init", help="레포에 hermes/backlog 스캐폴드 생성")
+    ie = sub.add_parser("init", help="환경 초기화: 상위 폴더의 레포를 스캔해 fleet.yaml/.env 를 만들고 LLM 을 점검 (받은 직후 1회)")
+    ie.add_argument("--root", help="레포들이 있는 폴더 (기본: hermes-fleet 의 상위 폴더)")
+    ie.add_argument("--include", action="append", help="대상 레포 이름(쉼표 구분, 반복 가능). 없으면 FE+BE 탐지 레포 전부")
+    ie.add_argument("--provider", choices=["ollama", "openai"]); ie.add_argument("--model"); ie.add_argument("--base-url"); ie.add_argument("--api-key")
+    ie.add_argument("--force", action="store_true", help="기존 fleet.yaml/.env 를 덮어쓴다")
+    ie.add_argument("--scaffold", action="store_true", help="대상 레포에 hermes/ 스캐폴드도 만든다")
+    ie.add_argument("--cron", action="store_true", help="끝나면 scripts/install-cron.sh 실행")
+    ie.add_argument("--yes", "-y", action="store_true", help="묻지 않고 기본값으로 진행")
+    ie.add_argument("--fleet-dir", help=argparse.SUPPRESS)
+    ie.set_defaults(func=cmd_init_env)
+    i = sub.add_parser("scaffold", help="레포에 hermes/backlog 스캐폴드 생성")
     i.add_argument("repo", nargs="*"); i.add_argument("--commit", action="store_true")
-    i.set_defaults(func=cmd_init)
+    i.set_defaults(func=cmd_scaffold)
     mo = sub.add_parser("monitor", help="웹 모니터(읽기 전용) 실행 — uv sync --extra monitor 또는 docker compose up")
     mo.add_argument("--host", default="127.0.0.1"); mo.add_argument("--port", type=int, default=8787)
     mo.add_argument("--reload", action="store_true")
@@ -340,6 +391,10 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    cfg_path = Path(args.config) if getattr(args, "config", None) else fleet_config_path()
+    if args.command != "init" and not cfg_path.exists():
+        print(f"✗ 설정이 없습니다: {cfg_path}\n  이 환경에서 처음이면 먼저 초기화하세요:  scripts/init.sh   (또는 uv run hermes-fleet init)", file=sys.stderr)
+        return 2
     try:
         return args.func(args)
     except TicketError as exc:

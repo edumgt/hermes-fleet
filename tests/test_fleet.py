@@ -82,9 +82,16 @@ def test_tick_round_robin_and_discover(tmp_path: Path, node_python_repo: Path, m
     assert dm.tick() == "work" and ran == [("shop", "HX-001")]
     assert dm.tick() == "work" and ran[-1] == ("second", "HX-001")
     discovered = []
-    monkeypatch.setattr(dm, "_run_discover", lambda p: discovered.append(p.name))
-    assert dm.tick() == "work" and discovered == ["shop"]      # 커서가 second 였으므로 shop 부터
-    assert dm.tick() == "work" and discovered == ["shop", "second"]
+    def fake_discover(p, created):
+        discovered.append(p.name)
+        st = f.load_state(dm.repo_state_path(p.name)); st["last_discover_at"] = dm.now().strftime("%Y-%m-%dT%H:%M:%S"); f.save_state(st, dm.repo_state_path(p.name))
+        return created
+    monkeypatch.setattr(dm, "_run_discover", lambda p: fake_discover(p, [Path("HX-002.md")] if p.name == "shop" else []))
+    assert dm.tick() == "work" and discovered == ["shop"]      # 커서가 second 였으므로 shop 부터; 제안이 생겼으니 work
+    assert dm.tick() == "wait" and discovered == ["shop", "second"]   # second 는 빈 발굴 → 바로 재발굴하지 않고 대기
+    assert dm.tick() == "wait" and discovered == ["shop", "second"]   # cooldown(기본 180분) 안이라 아무 레포도 발굴하지 않음
+    dm.now = lambda: now + dt.timedelta(hours=4)
+    assert dm.tick() == "work" and discovered == ["shop", "second", "shop"]   # cooldown 지나면 다시 발굴 (shop 은 제안이 생겨 work)
 
 
 def test_merge_due_once_per_day(tmp_path: Path, node_python_repo: Path, monkeypatch):
@@ -127,5 +134,5 @@ def test_run_outside_window_exits_silently_unless_requests(tmp_path: Path, node_
     # 웹에서 시간대를 지금 시각으로 바꾸면(fleet.yaml hot-reload 와 같은 효과) 같은 cron 틱에서 시작한다
     dm, logs = make_daemon(tmp_path, [p], dt.datetime(2026, 11, 8, 13, 0), monkeypatch)
     dm.cfg.active_hours = "12:00-18:00"
-    dm.window = f.parse_window(dm.cfg.active_hours)
+    dm.schedule = f.Schedule(dm.cfg.active_hours, dm.cfg.calendar)
     assert dm._idle_outside_window() is False

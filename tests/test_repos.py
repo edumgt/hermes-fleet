@@ -87,3 +87,17 @@ def test_fleet_config_load(tmp_path: Path):
     f.write_text("root: /tmp/x\nactive_hours: '01:00-08:00'\nmerge_at: '07:30'\nexclude: [a]\nauto_merge: {push: false}\n")
     cfg = FleetConfig.load(f)
     assert cfg.root == Path("/tmp/x") and cfg.exclude == ["a"] and cfg.auto_merge["push"] is False and cfg.auto_merge["verify"] is True
+
+
+
+def test_root_defaults_to_parent_and_relative_is_yaml_based(tmp_path):
+    from hermes_fleet.repos import FleetConfig
+    fleet = tmp_path / "work" / "hermes-fleet"
+    fleet.mkdir(parents=True)
+    y = fleet / "fleet.yaml"
+    y.write_text("root:\n", encoding="utf-8")
+    assert FleetConfig.load(y).root == (tmp_path / "work").resolve()          # 비우면 상위 폴더
+    y.write_text("root: ../other\n", encoding="utf-8")
+    assert FleetConfig.load(y).root == (tmp_path / "work" / "other").resolve()  # 상대 경로는 fleet.yaml 기준
+    y.write_text(f"root: {tmp_path}\n", encoding="utf-8")
+    assert FleetConfig.load(y).root == tmp_path

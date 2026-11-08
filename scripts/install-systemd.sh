@@ -9,7 +9,7 @@ if [ "$STATE" != "running" ] && [ "$STATE" != "degraded" ]; then
   echo "systemd 가 활성화되어 있지 않습니다 (state: ${STATE:-none}). /etc/wsl.conf 에 [boot] systemd=true 를 넣고 'wsl --shutdown' 후 재실행하거나, scripts/install-cron.sh 를 사용하세요."
   exit 1
 fi
-sed -e "s#/home/ubuntu/hermes-fleet#$FLEET_DIR#g" -e "s#/root/.local/bin/uv#$UV_BIN#g" "$FLEET_DIR/systemd/hermes-fleet.service" > /etc/systemd/system/hermes-fleet.service
+sed -e "s#/opt/hermes-fleet#$FLEET_DIR#g" -e "s#/root/.local/bin/uv#$UV_BIN#g" "$FLEET_DIR/systemd/hermes-fleet.service" > /etc/systemd/system/hermes-fleet.service
 mkdir -p "$FLEET_DIR/state" "$FLEET_DIR/logs"
 systemctl daemon-reload
 systemctl enable --now hermes-fleet.service

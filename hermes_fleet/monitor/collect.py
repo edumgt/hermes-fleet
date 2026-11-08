@@ -19,15 +19,16 @@ from typing import Any, Callable
 
 from ..backlog import VALID_STATUS, Ticket, TicketError, load_tickets
 from .. import requests as rq
-from ..fleetfile import SCHEDULE_KEYS, FleetFileError, is_selected, set_repo_selected, update_schedule
+from ..fleetfile import SCHEDULE_KEYS, FleetFileError, is_selected, set_repo_selected, update_approval, update_calendar, update_schedule
 from ..llm import check_endpoint
 from ..merge import list_ticket_branches, ticket_on_branch
 from ..org import load_org_for, load_template
 from ..repos import FleetConfig, RepoProfile, detect_profile
-from ..schedule import can_start_work, is_active, minutes_until_end, parse_clock, parse_window
+from ..schedule import Schedule, parse_clock
 from ..settings import FLEET_DIR, REPO_WORKSPACE_DIR, Settings, load_dotenv
 from ..tools import git
 from ..workflow import detect_delivery, github_runs, sync_status
+from .crew import CrewFeedParser, roles_from_org
 
 LOG_TS = re.compile(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}) (.*)$")
 LOG_REPO = re.compile(r"\[(?:fleet|merge)\]\[([^\]]+)\]|^\[([^\]]+)\]\[(?:pm|design|dev|qa)\]")
@@ -258,32 +259,48 @@ class Collector:
 
     # ----- 설정 -----
     def config(self) -> FleetConfig:
-        return FleetConfig.load(self.paths.config)
+        if self.paths.config.exists():
+            return FleetConfig.load(self.paths.config)
+        example = self.paths.fleet_dir / "fleet.example.yaml"      # 받은 직후(초기화 전): 템플릿 기본값 + 상위 폴더 스캔으로 읽기 전용 표시
+        cfg = FleetConfig.load(example) if example.exists() else FleetConfig(root=self.paths.fleet_dir.parent)
+        cfg.source = None
+        return cfg
+
+    def initialized(self) -> bool:
+        return self.paths.config.exists()
 
     def settings(self) -> Settings:
         return Settings.from_env()
 
     # ----- 스케줄 -----
     def schedule(self, cfg: FleetConfig, now: dt.datetime) -> dict[str, Any]:
-        window = parse_window(cfg.active_hours)
+        sch = Schedule(cfg.active_hours, cfg.calendar)
         merge_time = parse_clock(cfg.merge_at)
-        active = is_active(now.time(), window)
+        active = sch.is_active(now)
         margin = int(cfg.no_new_work_minutes_before_end)
-        next_start = None
-        if window and not active:
-            cand = dt.datetime.combine(now.date(), window[0])
-            if cand <= now:
-                cand += dt.timedelta(days=1)
-            next_start = cand.strftime("%Y-%m-%dT%H:%M:%S")
-        remain = minutes_until_end(now.time(), window)
+        nxt = sch.next_start(now)
+        remain = sch.minutes_until_end(now)
+        today_kind, today_w = sch.window_on(now.date())
+        from ..schedule import window_spec  # noqa: WPS433
+        first = (now.date().replace(day=1) - dt.timedelta(days=31)).replace(day=1)   # 지난달 1일부터 3개월치
         return {
             "active_hours": cfg.active_hours, "merge_at": cfg.merge_at, "in_window": active,
-            "can_start_work": can_start_work(now.time(), window, margin),
+            "can_start_work": sch.can_start_work(now, margin),
             "minutes_until_end": None if remain == float("inf") else round(remain),
             "no_new_work_minutes_before_end": margin, "poll_seconds": int(cfg.poll_seconds),
-            "next_window_start": next_start,
+            "next_window_start": nxt.strftime("%Y-%m-%dT%H:%M:%S") if nxt else None,
             "merge_window_open": bool(merge_time and active and now.time() >= merge_time),
+            "calendar": sch.calendar_specs(),
+            "today": {"date": now.date().isoformat(), "kind": today_kind, "spec": window_spec(today_w)},
+            "days": sch.days(first, 31 * 3 + 7),
         }
+
+    def update_calendar(self, entries: dict[str, Any]) -> dict[str, Any]:
+        self._require_writable()
+        update_calendar(self.paths.config, entries)
+        self._cfg = None
+        cfg = self.config()
+        return {"calendar": cfg.calendar, "schedule": self.schedule(cfg, self.now())}
 
     # ----- 데몬 -----
     def daemon(self, cfg: FleetConfig, now: dt.datetime) -> dict[str, Any]:
@@ -324,7 +341,7 @@ class Collector:
             status, method = "stopped", "log"
 
         activity = self._current_activity(lines, status == "running")
-        in_window = is_active(now.time(), parse_window(cfg.active_hours))
+        in_window = Schedule(cfg.active_hours, cfg.calendar).is_active(now)
         return {
             "status": status, "method": method, "paused": paused,
             "pause_note": self.paths.pause_file.read_text(encoding="utf-8").strip() if paused else None,
@@ -382,6 +399,69 @@ class Collector:
         self._llm_cache = (time.time(), out)
         return out
 
+    # ----- 크루 룸 (역할별 대화 피드) -----
+    CREW_TAIL_LINES = 60000          # CrewAI 패널이 한 단계에 수백 줄이라 넉넉히 읽는다 (바이트 상한은 CREW_TAIL_BYTES)
+    CREW_TAIL_BYTES = 6 * 1024 * 1024
+
+    def _crew_orgs(self) -> dict[str, dict[str, Any]]:
+        """대상 레포별 org(roles/stages). 템플릿 또는 레포의 hermes/config/org.yaml."""
+        orgs: dict[str, dict[str, Any]] = {}
+        for sc in self.scan():
+            if not sc.target:
+                continue
+            try:
+                orgs[sc.profile.name] = load_org_for(sc.profile, self.paths.template_org)
+            except (OSError, ValueError, KeyError):
+                continue
+        return orgs
+
+    def crew_parser(self, orgs: dict[str, dict[str, Any]] | None = None) -> CrewFeedParser:
+        orgs = orgs if orgs is not None else self._crew_orgs()
+        try:
+            template = load_template(self.paths.template_org)
+        except (OSError, ValueError, KeyError):
+            template = {"roles": {}, "stages": {}, "discover": {}}
+
+        def role_for(repo: str | None, stage: str) -> str:
+            org = orgs.get(repo or "", template)
+            if stage == "discover":
+                return (org.get("discover") or {}).get("role") or "techlead"
+            spec = (org.get("stages") or {}).get(stage)
+            return spec["role"] if spec else {"pm": "pm", "design": "designer", "dev": "developer", "qa": "qa"}.get(stage, "system")
+
+        def role_by_title(repo: str | None, title: str) -> str | None:
+            org = orgs.get(repo or "", template)
+            t = title.strip().lower()
+            for key, spec in (org.get("roles") or {}).items():
+                if str(spec.get("role", "")).strip().lower() == t:
+                    return key
+            return CrewFeedParser._default_role_by_title(repo, title)
+
+        return CrewFeedParser(role_for=role_for, role_by_title=role_by_title)
+
+    def crew(self, repo: str | None = None, limit: int = 300, parser: CrewFeedParser | None = None) -> dict[str, Any]:
+        """크루 룸 스냅샷: 레포별 역할 목록·상태 + 최근 메시지. parser 를 넘기면(SSE) 그 상태를 쓰고, 없으면 로그 tail 을 새로 파싱."""
+        now = self.now()
+        cfg = self.config()
+        orgs = self._crew_orgs()
+        if parser is None:
+            parser = self.crew_parser(orgs)
+            lines, _ = tail_lines(self.paths.daemon_log, self.CREW_TAIL_LINES, self.CREW_TAIL_BYTES)
+            parser.feed(lines)
+        d = self.daemon(cfg, now)
+        running = d["status"] == "running"
+        rooms = []
+        for name, org in orgs.items():
+            roles = roles_from_org(org)
+            rooms.append({"name": name, "roles": roles, "status": parser.status(name, [r["key"] for r in roles], running),
+                          "active": bool(running and parser.repos.get(name) and parser.repos[name].active),
+                          "ticket": parser.repos[name].ticket if name in parser.repos else None,
+                          "stage": parser.repos[name].stage if name in parser.repos else None,
+                          "paused": rq.is_repo_paused(self.paths.state_dir, name), "org_source": org.get("_source")})
+        msgs = [m for m in parser.messages if repo is None or m["repo"] in (repo, None)]
+        return {"now": now.strftime("%Y-%m-%dT%H:%M:%S"), "daemon": {"status": d["status"], "paused": d["paused"], "activity": d["activity"]},
+                "rooms": rooms, "messages": msgs[-limit:], "total_messages": len(msgs)}
+
     # ----- 레포 스캔 (제외/비포함 레포도 프로파일링) -----
     def scan(self, cfg: FleetConfig | None = None) -> list[ScannedRepo]:
         cfg = cfg or self.config()
@@ -394,6 +474,7 @@ class Collector:
             if not child.is_dir() or child.name.startswith(".") or not git.is_repo(child):
                 continue
             profile = detect_profile(child, (cfg.repos or {}).get(child.name))
+            profile.approval = cfg.approval_for(child.name)
             out.append(ScannedRepo(profile=profile, excluded=child.name in exclude, in_include=not include or child.name in include))
         return out
 
@@ -438,7 +519,8 @@ class Collector:
                                 "excluded": s.excluded, "in_include": s.in_include, "reasons": reasons,
                                 "paused": rq.is_repo_paused(self.paths.state_dir, p.name), "pending_requests": pending, "deny": list(p.deny),
                                 "frontend": p.frontend.label() if p.frontend else None, "backend": p.backend.label() if p.backend else None,
-                                "base_branch": p.base_branch, "has_remote": p.has_remote}
+                                "base_branch": p.base_branch, "has_remote": p.has_remote,
+                                "approval": p.approval, "approval_override": p.name in (self.config().approval.get("repos") or {})}
         if not p.eligible:
             return base
         state = self._repo_state(p.name)
@@ -555,11 +637,13 @@ class Collector:
             last_disc = f"{last_disc[:4]}-{last_disc[4:6]}-{last_disc[6:8]}T{last_disc[9:11]}:{last_disc[11:13]}:{last_disc[13:15]}"
         mine = activity if activity and activity.get("repo") == r["name"] else None
         off = "none" if not target else None
+        manual = (r.get("approval") or "auto") == "manual"
         stages = [
-            {"key": "discover", "label": "발굴", "mode": off or "auto", "count": counts.get("proposed", 0), "at": last_disc,
-             "status": "ok" if counts.get("proposed") else "idle", "detail": f"승인 대기 {counts.get('proposed', 0)}" if target else "대상 아님"},
-            {"key": "approve", "label": "승인", "mode": off or "manual", "count": counts.get("todo", 0), "status": "ok" if counts.get("todo") else "idle",
-             "detail": f"todo {counts.get('todo', 0)} (사람/웹 승인)"},
+            {"key": "discover", "label": "발굴", "mode": off or "auto", "count": counts.get("proposed", 0) if manual else counts.get("todo", 0) + counts.get("proposed", 0), "at": last_disc,
+             "status": "ok" if (counts.get("proposed") if manual else counts.get("todo") or counts.get("proposed")) else "idle",
+             "detail": (f"승인 대기 {counts.get('proposed', 0)}" if manual else f"제안 → 바로 todo {counts.get('todo', 0)}") if target else "대상 아님"},
+            {"key": "approve", "label": "승인", "mode": off or ("manual" if manual else "auto"), "count": counts.get("todo", 0), "status": "ok" if counts.get("todo") else "idle",
+             "detail": f"todo {counts.get('todo', 0)} (사람/웹 승인)" if manual else f"자동 승인 · todo {counts.get('todo', 0)}"},
             {"key": "crew", "label": "크루 작업", "mode": off or "auto", "count": counts.get("in-progress", 0) + (1 if mine and mine.get("kind") == "ticket" else 0),
              "status": "running" if mine else ("ok" if r.get("processed_count") else "idle"), "at": (r.get("last_ticket") or {}).get("finished_at"),
              "detail": (f"진행 중 {mine.get('id')} {('· ' + mine['stage']['name']) if mine.get('stage') else ''}" if mine else f"처리 {r.get('processed_count', 0)} · PASS {verdicts.get('PASS', 0)} / FAIL {verdicts.get('FAIL', 0)} / ERR {verdicts.get('ERROR', 0)}")},
@@ -658,6 +742,21 @@ class Collector:
     def cancel_request(self, request_id: str) -> bool:
         self._require_writable()
         return rq.cancel(self.paths.state_dir, request_id)
+
+    def set_repo_approval(self, repo: str, mode: str | None) -> dict[str, Any]:
+        """레포의 사람 승인 모드(auto|manual|default=예외 삭제)를 fleet.yaml approval.repos 에 저장."""
+        self._require_writable()
+        if self.find(repo) is None:
+            raise ValueError(f"root 아래에 없는 레포: {repo}")
+        saved = update_approval(self.paths.config, repos={repo: None if (mode or "default") == "default" else mode})
+        self._cfg = None
+        return {"repo": repo, "approval": self.config().approval_for(repo), "override": repo in saved["repos"], "approval_config": saved}
+
+    def set_default_approval(self, mode: str) -> dict[str, Any]:
+        self._require_writable()
+        saved = update_approval(self.paths.config, default=mode)
+        self._cfg = None
+        return {"approval_config": saved}
 
     def set_repo_paused(self, repo: str, paused: bool) -> dict[str, Any]:
         self._require_writable()
@@ -880,8 +979,8 @@ class Collector:
                 totals[st] = totals.get(st, 0) + n
         fleet = read_json(self.paths.fleet_state)
         return {
-            "now": now.strftime("%Y-%m-%dT%H:%M:%S"), "tz": time.strftime("%Z"),
-            "fleet_dir": str(self.paths.fleet_dir), "config": str(self.paths.config), "config_writable": self.paths.config_writable(),
+            "now": now.strftime("%Y-%m-%dT%H:%M:%S"), "tz": "KST (Asia/Seoul, UTC+9)",
+            "fleet_dir": str(self.paths.fleet_dir), "config": str(self.paths.config), "config_writable": self.paths.config_writable(), "initialized": self.initialized(),
             "root": str(cfg.root), "include": [str(x) for x in (cfg.include or [])], "exclude": [str(x) for x in (cfg.exclude or [])],
             "schedule": self.schedule(cfg, now), "daemon": self.daemon(cfg, now), "llm": self.llm(),
             "cursor": fleet.get("cursor"), "last_run": fleet.get("last_run"),
@@ -889,6 +988,6 @@ class Collector:
             "control": {"writable": os.access(self.paths.fleet_dir, os.W_OK), "config_writable": self.paths.config_writable(),
                         "paused_all": self.paths.pause_file.exists(), "paused_repos": rq.paused_repos(self.paths.state_dir),
                         "pending": rq.list_pending(self.paths.state_dir), "recent": rq.list_done(self.paths.state_dir, 12)},
-            "auto_merge": cfg.auto_merge, "discover": cfg.discover, "frontend_guide": self._frontend_guide_summary(),
+            "auto_merge": cfg.auto_merge, "discover": cfg.discover, "approval": cfg.approval, "frontend_guide": self._frontend_guide_summary(),
             "monitor": {"uptime_seconds": round(time.time() - self.started_at), "in_docker": Path("/.dockerenv").exists()},
         }

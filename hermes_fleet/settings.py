@@ -3,8 +3,16 @@ from __future__ import annotations
 
 import os
 import subprocess
+import time
 from dataclasses import dataclass
 from pathlib import Path
+
+# 모든 날짜·시간은 한국 시간(Asia/Seoul, KST) 기준 — 호스트/컨테이너의 TZ 와 무관하게 프로세스 시간대를 고정한다.
+# (daemon.log 타임스탬프, state/*.json, requests, run.jsonl, merge-report 의 모든 시각이 여기서 나온다)
+KST_TZ = "Asia/Seoul"
+os.environ["TZ"] = KST_TZ
+if hasattr(time, "tzset"):
+    time.tzset()
 
 FLEET_DIR = Path(__file__).resolve().parent.parent
 STATE_DIR = FLEET_DIR / "state"
@@ -13,7 +21,7 @@ TEMPLATE_ORG = FLEET_DIR / "templates" / "org.yaml"
 DEFAULT_FLEET_CONFIG = FLEET_DIR / "fleet.yaml"
 PAUSE_FILE = STATE_DIR / "PAUSE"
 
-# 각 저장소 안에서 Hermes가 쓰는 디렉터리 (webrtc-app/hermes 와 같은 규약)
+# 각 저장소 안에서 Hermes가 쓰는 디렉터리
 REPO_HERMES_DIR = "hermes"
 REPO_BACKLOG_DIR = "hermes/backlog"
 REPO_WORKSPACE_DIR = "hermes/workspace"
