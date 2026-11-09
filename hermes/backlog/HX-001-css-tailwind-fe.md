@@ -2,7 +2,7 @@
 id: HX-001
 title: 모니터 CSS 를 Tailwind 유틸리티로 전면 전환 (FE 가이드 준수)
 priority: P2
-status: proposed
+status: todo
 area: frontend
 stages: [pm, design, dev, qa]
 acceptance:
