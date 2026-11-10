@@ -62,12 +62,14 @@ state 로는 FE/BE 탐지 결과·원격 유무·마지막 커밋 경과일·최
 review:
   on_start: true          # 컨테이너 기동 때 실행 (HERMES_REVIEW=skip 으로도 끔)
   mode: apply             # apply | advise
-  model: jev-latest       # 비우면 .env JEV_MODEL
+  model: ""               # 비우면 .env JEV_MODEL
   min_confidence: 0.6
   pinned: []
   max_commits: 15
 ```
-키는 `.env` 의 `TYPESAFE_API_KEY`(발급 https://console.typesafe.ai/keys, 입력 토큰당 과금·출력 무료). OpenRouter 를 쓰면 `TYPESAFE_BASE_URL=https://openrouter.ai/api`, `JEV_MODEL=typesafe/jev-1.14`. 키가 없으면 판정을 건너뛰고 모니터에 안내만 뜬다 — 선택/해제는 그대로 수동(체크박스)으로 할 수 있다.
+키는 `.env`의 `TYPESAFE_API_KEY`(직접 API, 발급 https://console.typesafe.ai/keys) 또는 `OPENROUTER_API_KEY`(OpenRouter)를 쓴다. OpenRouter에서는 `JEV_PROVIDER=openrouter`, `JEV_MODEL=typesafe/jev-1.14`를 설정한다. Hermes Fleet가 OpenRouter Decisions API(`/api/alpha/decisions`)를 선택하므로 일반 채팅 엔드포인트로 잘못 호출하지 않는다. 키가 없으면 판정을 건너뛰고 모니터에 안내만 뜬다 — 선택/해제는 그대로 수동(체크박스)으로 할 수 있다.
+
+작업 크루가 글·코드를 생성하는 LLM과 Jev 판정 모델은 독립적으로 고를 수 있다. 기본은 로컬 Ollama(`HERMES_LLM_PROVIDER=ollama`)이며, LM Studio/vLLM/OpenRouter 같은 OpenAI 호환 생성 LLM은 `HERMES_LLM_PROVIDER=openai`, 해당 `HERMES_BASE_URL`과 `HERMES_API_KEY`를 설정한다. Jev를 OpenRouter로 써도 생성 작업은 계속 로컬 모델로 유지할 수 있다.
 
 ## 사람 승인 모드 (approval)
 

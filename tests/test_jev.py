@@ -75,11 +75,15 @@ def test_retries_on_429_and_network_then_succeeds():
 
 
 def test_settings_from_env_and_check(monkeypatch, tmp_path):
+    monkeypatch.setattr(jev, "load_dotenv", lambda: None)
     monkeypatch.setenv("TYPESAFE_API_KEY", "")
-    monkeypatch.setenv("TYPESAFE_BASE_URL", "https://openrouter.ai/api/")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "")
+    monkeypatch.setenv("JEV_PROVIDER", "openrouter")
+    monkeypatch.setenv("TYPESAFE_BASE_URL", "https://openrouter.ai/")
     monkeypatch.setenv("JEV_MODEL", "typesafe/jev-1.14")
     st = jev.JevSettings.from_env()
-    assert not st.configured and st.base_url == "https://openrouter.ai/api" and st.model == "typesafe/jev-1.14"
+    assert not st.configured and st.provider == "openrouter" and st.base_url == "https://openrouter.ai" and st.model == "typesafe/jev-1.14"
+    assert st.decisions_path == "/api/alpha/decisions" and st.models_path == "/api/v1/models"
     assert jev.JevSettings.from_env(model="jev-1.13.0").model == "jev-1.13.0"
     assert jev.check(st)["error"] == "TYPESAFE_API_KEY 없음"
     st2 = jev.JevSettings(api_key="k")
@@ -87,3 +91,20 @@ def test_settings_from_env_and_check(monkeypatch, tmp_path):
     info = jev.check(st2, http=lambda r, t: (200, models, {}))
     assert info["ok"] and "jev-latest" in info["models"] and info["model_available"]
     assert not jev.check(st2, http=lambda r, t: (401, b'{"detail":"bad"}', {}))["ok"]
+
+
+def test_openrouter_decisions_contract(monkeypatch):
+    monkeypatch.setattr(jev, "load_dotenv", lambda: None)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test")
+    monkeypatch.delenv("JEV_PROVIDER", raising=False)
+    monkeypatch.delenv("TYPESAFE_BASE_URL", raising=False)
+    st = jev.JevSettings.from_env()
+    seen = {}
+
+    def fake_http(req, _timeout):
+        seen["url"] = req.full_url
+        seen["auth"] = req.get_header("Authorization")
+        return 200, json.dumps(ok_answers()).encode(), {}
+
+    jev.decide({"repository": "shop"}, {"proceed": {"type": "choice", "criteria": {"proceed": None, "skip": None}}}, st, http=fake_http)
+    assert seen == {"url": "https://openrouter.ai/api/alpha/decisions", "auth": "Bearer sk-or-test"}

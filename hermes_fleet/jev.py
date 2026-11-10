@@ -6,7 +6,8 @@ Jev 는 문장을 생성하지 않고 state(텍스트/JSON) + 타입 있는 질�
   - noul  : 예/아니오 진술이 참일 확률 → {noul: 0~1}
 계약: POST {base}/v1/systemone, Authorization: Bearer <TYPESAFE_API_KEY>, 응답 {model, answers{key→answer}, usage{input_tokens,output_tokens}}.
 오류: 401(키) 422(검증: detail 목록) 429(속도 제한) 529(과부하) — 429/529/408/5xx 는 지수 백오프로 재시도(Retry-After 존중).
-OpenRouter 경유도 같은 경로(base_url=https://openrouter.ai/api, 모델 typesafe/jev-1.14)라 TYPESAFE_BASE_URL/JEV_MODEL 로 바꿀 수 있다.
+TypeSafe 직접 API와 OpenRouter Decisions API를 모두 지원한다. OpenRouter는 일반 채팅 API가 아니라
+`POST /api/alpha/decisions`를 써야 하며, `typesafe/jev-*` 모델 ID를 사용한다.
 """
 from __future__ import annotations
 
@@ -24,6 +25,9 @@ DEFAULT_BASE_URL = "https://api.typesafe.ai"
 DEFAULT_MODEL = "jev-latest"
 SYSTEM_ONE_PATH = "/v1/systemone"
 MODELS_PATH = "/v1/models"
+OPENROUTER_BASE_URL = "https://openrouter.ai"
+OPENROUTER_DECISIONS_PATH = "/api/alpha/decisions"
+OPENROUTER_MODELS_PATH = "/api/v1/models"
 RETRY_STATUSES = {408, 429, 500, 502, 503, 504, 529}
 USER_AGENT = "hermes-fleet/0.1 (+jev review)"
 
@@ -45,16 +49,33 @@ class JevSettings:
     api_key: str = ""
     base_url: str = DEFAULT_BASE_URL
     model: str = DEFAULT_MODEL
+    provider: str = "typesafe"
     timeout: float = 30.0
     retries: int = 3
 
     @classmethod
     def from_env(cls, model: str | None = None) -> "JevSettings":
-        """TYPESAFE_API_KEY / TYPESAFE_BASE_URL / JEV_MODEL (환경변수 → hermes-fleet/.env). model 인자가 있으면 그것이 우선."""
+        """환경변수/.env에서 TypeSafe 또는 OpenRouter Jev 설정을 읽는다.
+
+        `JEV_PROVIDER=openrouter`를 명시할 수 있고, 생략 시 OpenRouter URL·키 접두사로
+        추론한다. OpenRouter 키는 `OPENROUTER_API_KEY`를 우선하며 기존
+        `TYPESAFE_API_KEY` 설정도 호환한다.
+        """
         load_dotenv()
-        return cls(api_key=os.environ.get("TYPESAFE_API_KEY", "").strip(),
-                   base_url=(os.environ.get("TYPESAFE_BASE_URL", "").strip() or DEFAULT_BASE_URL).rstrip("/"),
-                   model=(model or os.environ.get("JEV_MODEL", "").strip() or DEFAULT_MODEL))
+        explicit_provider = os.environ.get("JEV_PROVIDER", "").strip().lower()
+        configured_base = os.environ.get("TYPESAFE_BASE_URL", "").strip().rstrip("/")
+        openrouter_key = os.environ.get("OPENROUTER_API_KEY", "").strip()
+        legacy_key = os.environ.get("TYPESAFE_API_KEY", "").strip()
+        provider = explicit_provider or (
+            "openrouter" if "openrouter.ai" in configured_base or openrouter_key or legacy_key.startswith("sk-or-") else "typesafe"
+        )
+        if provider not in {"typesafe", "openrouter"}:
+            provider = "typesafe"
+        api_key = openrouter_key if provider == "openrouter" and openrouter_key else legacy_key
+        base_url = configured_base or (OPENROUTER_BASE_URL if provider == "openrouter" else DEFAULT_BASE_URL)
+        env_model = os.environ.get("JEV_MODEL", "").strip()
+        default_model = "typesafe/jev-1.14" if provider == "openrouter" else DEFAULT_MODEL
+        return cls(api_key=api_key, base_url=base_url, model=(model or env_model or default_model), provider=provider)
 
     @property
     def configured(self) -> bool:
@@ -62,6 +83,14 @@ class JevSettings:
 
     def headers(self) -> dict[str, str]:
         return {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json", "Accept": "application/json", "User-Agent": USER_AGENT}
+
+    @property
+    def decisions_path(self) -> str:
+        return OPENROUTER_DECISIONS_PATH if self.provider == "openrouter" else SYSTEM_ONE_PATH
+
+    @property
+    def models_path(self) -> str:
+        return OPENROUTER_MODELS_PATH if self.provider == "openrouter" else MODELS_PATH
 
 
 def _http(req: urllib.request.Request, timeout: float) -> tuple[int, bytes, dict[str, str]]:
@@ -134,7 +163,7 @@ def decide(state: Any, questions: dict[str, dict[str, Any]], settings: JevSettin
     """한 번의 System One 호출. 응답 {model, answers, usage} 를 그대로 돌려준다(answers 가 없으면 JevError)."""
     if not questions:
         raise JevError("질문이 비어 있습니다")
-    payload = _request(settings, "POST", SYSTEM_ONE_PATH, {"model": settings.model, "state": state, "questions": questions}, http, sleep)
+    payload = _request(settings, "POST", settings.decisions_path, {"model": settings.model, "state": state, "questions": questions}, http, sleep)
     if not isinstance(payload, dict) or not isinstance(payload.get("answers"), dict):
         raise JevError(f"Jev 응답 형식이 다릅니다: {str(payload)[:300]}", status=200, detail=payload)
     missing = [k for k in questions if k not in payload["answers"]]
@@ -145,24 +174,32 @@ def decide(state: Any, questions: dict[str, dict[str, Any]], settings: JevSettin
 
 def check(settings: JevSettings, http: Http | None = None) -> dict[str, Any]:
     """GET /v1/models 로 키·연결을 점검한다. {ok, url, model, models, error}."""
-    url = settings.base_url + MODELS_PATH
+    url = settings.base_url + settings.models_path
     if not settings.configured:
         return {"ok": False, "url": url, "model": settings.model, "models": [], "error": "TYPESAFE_API_KEY 없음"}
     try:
-        payload = _request(settings, "GET", MODELS_PATH, None, http, lambda s: None)
+        payload = _request(settings, "GET", settings.models_path, None, http, lambda s: None)
     except JevError as exc:
         return {"ok": False, "url": url, "model": settings.model, "models": [], "error": str(exc)}
     names: list[str] = []
     rows = payload.get("models") or payload.get("data") or [] if isinstance(payload, dict) else payload
     for m in rows or []:
         if isinstance(m, dict):
-            names.append(str(m.get("name") or m.get("id") or ""))
+            # OpenRouter는 `name`에 표시명("TypeSafe: Jev 1.14")을, `id`에
+            # 실제 호출 모델 ID("typesafe/jev-1.14")를 담는다. 둘 다 보존해야
+            # model_available 검사와 UI 목록이 정확하다.
+            names.extend(str(m.get(k) or "") for k in ("id", "name"))
             for alias in m.get("aliases") or []:
                 names.append(str(alias))
         elif isinstance(m, str):
             names.append(m)
     names = [n for n in names if n]
-    return {"ok": True, "url": url, "model": settings.model, "models": names, "model_available": settings.model in names or not names, "error": None}
+    # OpenRouter의 /models 카탈로그는 Decisions API 전용 Jev 버전/별칭을 항상
+    # 모두 열거하지 않는다. `typesafe/jev-*`는 Decisions 호출에서 판정하므로
+    # 카탈로그 누락만으로 경고하지 않는다(실제 호출 오류는 review 결과에 남는다).
+    openrouter_jev = settings.provider == "openrouter" and settings.model.lstrip("~").startswith("typesafe/jev-")
+    return {"ok": True, "url": url, "model": settings.model, "models": names,
+            "model_available": settings.model in names or not names or openrouter_jev, "error": None}
 
 
 # ---------- 답 읽기 헬퍼 ----------

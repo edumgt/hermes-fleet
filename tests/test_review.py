@@ -105,7 +105,7 @@ def test_second_review_sees_changes_since_previous_head(tmp_path: Path):
     assert states["still"]["changes_since_previous_review"]["status"] == "unchanged"
 
 
-def test_advise_and_dry_run_do_not_edit_and_errors_are_recorded(tmp_path: Path):
+def test_advise_and_dry_run_do_not_edit_and_errors_are_recorded(tmp_path: Path, monkeypatch):
     fleet, cfg_path = make_fleet(tmp_path, extra="  mode: advise\n")
     make_repo(tmp_path, "sandbox")
     res = rv.run_review(fleet, FleetConfig.load(cfg_path), decider=lambda s, q: answers("skip", 0.1, 0.9))
@@ -124,8 +124,9 @@ def test_advise_and_dry_run_do_not_edit_and_errors_are_recorded(tmp_path: Path):
     saved = json.loads((fleet / "state" / "review.json").read_text(encoding="utf-8"))
     assert not saved["ok"] and "sandbox" in saved["heads"]
     # 키 없음(실제 Jev 경로) → 호출 없이 안내만
-    import os
-    os.environ["TYPESAFE_API_KEY"] = ""
+    monkeypatch.setattr(jev, "load_dotenv", lambda: None)
+    monkeypatch.setenv("TYPESAFE_API_KEY", "")
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
     res = rv.run_review(fleet, FleetConfig.load(cfg_path))
     assert not res["ok"] and "TYPESAFE_API_KEY" in res["error"] and res["repos"] == []
 
@@ -153,7 +154,11 @@ def test_monitor_api_review_runs_through_fake_jev_http(tmp_path: Path, monkeypat
 
     fleet, cfg_path = make_fleet(tmp_path)
     make_repo(tmp_path, "sandbox")
+    monkeypatch.setattr(jev, "load_dotenv", lambda: None)
     monkeypatch.setenv("TYPESAFE_API_KEY", "k")
+    monkeypatch.setenv("JEV_PROVIDER", "typesafe")
+    monkeypatch.setenv("JEV_MODEL", "jev-latest")
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
     monkeypatch.setattr(jev, "_http", lambda req, t: (200, json.dumps(answers("skip", 0.1, 0.9)).encode(), {}))
     col = c.Collector(c.MonitorPaths(fleet_dir=fleet, config=cfg_path))
     col._llm_cache = (float("inf"), {"ok": False, "provider": "ollama", "model": "m", "base_url": "u", "url": "u", "error": "test", "models": [], "role_models": {}, "missing_models": [], "checked_at": "x"})

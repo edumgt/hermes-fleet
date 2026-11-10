@@ -35,11 +35,13 @@ services:
       # GitHub Actions 실행 상태 조회용(비공개 레포면 필요). repo 읽기 권한의 fine-grained 토큰이면 충분.
       MONITOR_GITHUB_TOKEN: "${MONITOR_GITHUB_TOKEN:-}"
       # Jev(TypeSafe AI 판단 전용 모델) — 컨테이너 (재)기동 때 레포별 '프로젝트로 진행할지' 판정 → fleet.yaml include/exclude 갱신.
-      # 키는 보통 hermes-fleet/.env 의 TYPESAFE_API_KEY 에 둔다(마운트돼 컨테이너가 읽음). 여기 값이 비면 .env 가 쓰인다.
-      # HERMES_REVIEW=skip 으로 끔(fleet.yaml review.on_start 로도 끔). OpenRouter 경유: TYPESAFE_BASE_URL=https://openrouter.ai/api JEV_MODEL=typesafe/jev-1.14
+      # 키는 보통 hermes-fleet/.env 의 TYPESAFE_API_KEY 또는 OPENROUTER_API_KEY 에 둔다(마운트돼 컨테이너가 읽음). 여기 값이 비면 .env 가 쓰인다.
+      # HERMES_REVIEW=skip 으로 끔(fleet.yaml review.on_start 로도 끔). OpenRouter: JEV_PROVIDER=openrouter, JEV_MODEL=typesafe/jev-1.14.
       HERMES_REVIEW: "${HERMES_REVIEW:-auto}"
       TYPESAFE_API_KEY: "${TYPESAFE_API_KEY:-}"
+      OPENROUTER_API_KEY: "${OPENROUTER_API_KEY:-}"
       TYPESAFE_BASE_URL: "${TYPESAFE_BASE_URL:-}"
+      JEV_PROVIDER: "${JEV_PROVIDER:-}"
       JEV_MODEL: "${JEV_MODEL:-}"
     extra_hosts:
       - "host.docker.internal:host-gateway"
