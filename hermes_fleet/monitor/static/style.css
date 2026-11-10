@@ -279,7 +279,23 @@ ul.plain { margin: 4px 0; padding-left: 18px; }
 .crew-chip .st { font-size: 10px; color: var(--muted); }
 .crew-chip.active { border-color: var(--accent); color: var(--text); font-weight: 600; }
 .crew-chip.working .st { color: var(--accent); } .crew-chip.done .st { color: var(--good); } .crew-chip.fail .st { color: var(--critical); }
-.crew-layout { display: grid; grid-template-columns: minmax(0, 3fr) minmax(320px, 2fr); gap: 14px; }
+.crew-chip.resting .st { color: #f59e0b; } .crew-chip.harmony .st { color: #10b981; }
+
+/* 크루 툴바 컨트롤 & 버튼 그룹 */
+.crew-btn-group { display: inline-flex; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; background: var(--surface-2); vertical-align: middle; }
+.crew-btn { padding: 4px 10px; font-size: 12px; font-weight: 500; border: none; border-right: 1px solid var(--border); background: transparent; color: var(--text-2); cursor: pointer; transition: all 0.15s ease; font: inherit; display: inline-flex; align-items: center; gap: 4px; line-height: 1.5; }
+.crew-btn:last-child { border-right: none; }
+.crew-btn:hover { background: var(--surface); color: var(--text); }
+.crew-btn.active { background: color-mix(in srgb, var(--accent) 15%, var(--surface)); color: var(--accent); font-weight: 600; }
+.crew-btn-accent:hover, .crew-btn-accent.active { background: color-mix(in srgb, #f59e0b 20%, var(--surface)); color: #d97706; font-weight: 600; }
+.crew-btn-good:hover, .crew-btn-good.active { background: color-mix(in srgb, #10b981 20%, var(--surface)); color: #059669; font-weight: 600; }
+
+.crew-layout { display: grid; grid-template-columns: minmax(0, 3fr) minmax(320px, 2fr); gap: 14px; transition: all 0.25s ease-out; }
+/* 콘텐츠 영역 확대: 극장 모드 (3D 가상 공간 최대화) */
+.crew-layout.theater-mode { grid-template-columns: 1fr; }
+.crew-layout.theater-mode .crew-stage { height: 72vh; min-height: 560px; }
+.crew-layout.theater-mode .crew-chat { height: 280px; }
+.crew-stage:fullscreen { height: 100vh !important; width: 100vw !important; border-radius: 0; border: none; }
 @media (max-width: 1000px) { .crew-layout { grid-template-columns: 1fr; } }
 .crew-stage-wrap { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
 .crew-stage { position: relative; height: 540px; border-radius: 10px; overflow: hidden; background: var(--surface-2); border: 1px solid var(--border); }

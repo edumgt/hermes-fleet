@@ -1009,7 +1009,7 @@
   // ---------- 크루 룸 (3D 아바타 + 대화방) ----------
   const ROLE_COLOR_VAR = { pm: "--series-1", designer: "--series-5", developer: "--series-2", qa: "--series-3", techlead: "--series-7" };
   const ROLE_INITIAL = { pm: "PM", designer: "DS", developer: "DEV", qa: "QA", techlead: "TL" };
-  const ROLE_STATE_KO = { working: "작업 중", speaking: "발언 중", done: "완료", fail: "실패", idle: "대기" };
+  const ROLE_STATE_KO = { working: "작업 중", speaking: "발언 중", done: "완료", fail: "실패", resting: "휴식 중 ☕", harmony: "양보·화합 🤝", idle: "대기" };
   const CREW_STAGE_KO = { pm: "PRD", design: "디자인", dev: "구현", qa: "QA 검증", discover: "발굴", merge: "자동 머지" };
   const roleColor = (key) => cssVar(ROLE_COLOR_VAR[key] || "--series-4") || "#888";
   const crewRoom = () => state.crew.rooms.find((r) => r.name === state.crew.repo) || null;
@@ -1112,6 +1112,104 @@
   }
   $("#crew-repo").addEventListener("change", (e) => { state.crew.repo = e.target.value; state.crew.role = ""; $("#crew-follow").checked = false; renderCrew(true); });
   $("#crew-chat").addEventListener("scroll", () => { const p = $("#crew-chat"); if (p.scrollHeight - p.scrollTop - p.clientHeight > 40) $("#crew-autoscroll").checked = false; });
+
+  // 크루 룸 3D 카메라 뷰 프리셋 연동
+  const camPresets = [
+    { id: "#crew-cam-overview", name: "overview" },
+    { id: "#crew-cam-meeting", name: "meeting" },
+    { id: "#crew-cam-cafe", name: "cafe" },
+    { id: "#crew-cam-lounge", name: "lounge" }
+  ];
+  camPresets.forEach(({ id, name }) => {
+    const btn = $(id);
+    if (!btn) return;
+    btn.addEventListener("click", () => {
+      camPresets.forEach((c) => $(c.id)?.classList.remove("active"));
+      btn.classList.add("active");
+      if (state.crew.room) state.crew.room.setCameraPreset(name);
+    });
+  });
+
+  // 에이전트 힐링 휴식 모드 (Coffee Break) 토글
+  const btnRest = $("#crew-btn-rest");
+  if (btnRest) {
+    btnRest.addEventListener("click", () => {
+      if (!state.crew.room) return;
+      state.crew.room.triggerRestMode();
+      const isRest = state.crew.room.currentMode === "rest";
+      btnRest.classList.toggle("active", isRest);
+      if (isRest) {
+        $("#crew-btn-harmony")?.classList.remove("active");
+        camPresets.forEach((c) => $(c.id)?.classList.remove("active"));
+        $("#crew-cam-cafe")?.classList.add("active");
+        state.crew.messages.push({
+          id: "sys-rest-" + Date.now(),
+          role: "system",
+          kind: "thought",
+          ts: new Date().toISOString().replace("T", " ").slice(0, 19),
+          text: "☕ [HERMES 카페] AI 에이전트들이 잠시 업무를 멈추고 커피와 차를 마시며 리프레시 시간을 가집니다."
+        });
+      }
+      renderCrew(true);
+    });
+  }
+
+  // 에이전트 상호 양보 및 화합 회의 모드 (Harmony & Concession) 토글
+  const btnHarmony = $("#crew-btn-harmony");
+  if (btnHarmony) {
+    btnHarmony.addEventListener("click", () => {
+      if (!state.crew.room) return;
+      state.crew.room.triggerHarmonyMode();
+      const isHarmony = state.crew.room.currentMode === "harmony";
+      btnHarmony.classList.toggle("active", isHarmony);
+      if (isHarmony) {
+        $("#crew-btn-rest")?.classList.remove("active");
+        camPresets.forEach((c) => $(c.id)?.classList.remove("active"));
+        $("#crew-cam-meeting")?.classList.add("active");
+        state.crew.messages.push({
+          id: "sys-harmony-" + Date.now(),
+          role: "system",
+          kind: "stage_start",
+          ts: new Date().toISOString().replace("T", " ").slice(0, 19),
+          text: "🤝 [상호 양보 회의] 에이전트들이 의견 충돌 없이 서로의 제안을 경청하고 기꺼이 양보하여 최적의 합의를 도출합니다."
+        });
+      }
+      renderCrew(true);
+    });
+  }
+
+  // 콘텐츠 영역 확대: 극장 모드 (Theater Mode) 토글
+  const btnExpand = $("#crew-btn-expand");
+  const crewLayout = $("#crew-layout");
+  if (btnExpand && crewLayout) {
+    btnExpand.addEventListener("click", () => {
+      const isTheater = crewLayout.classList.toggle("theater-mode");
+      btnExpand.classList.toggle("active", isTheater);
+      btnExpand.textContent = isTheater ? "⛶ 기본 분할" : "⛶ 극장 모드";
+      btnExpand.title = isTheater ? "기본 분할 뷰로 복원" : "3D 가상 공간을 넓게 확대하는 극장 모드";
+      setTimeout(() => { if (state.crew.room) state.crew.room.resize(); }, 100);
+      setTimeout(() => { if (state.crew.room) state.crew.room.resize(); }, 300);
+    });
+  }
+
+  // 전체화면 모드 (Fullscreen Mode)
+  const btnFs = $("#crew-btn-fullscreen");
+  const crewStage = $("#crew-stage");
+  if (btnFs && crewStage) {
+    btnFs.addEventListener("click", () => {
+      if (!document.fullscreenElement) {
+        crewStage.requestFullscreen().catch(() => {});
+      } else {
+        document.exitFullscreen().catch(() => {});
+      }
+    });
+    document.addEventListener("fullscreenchange", () => {
+      const isFs = document.fullscreenElement === crewStage;
+      btnFs.classList.toggle("active", isFs);
+      btnFs.textContent = isFs ? "⛶ 화면 축소" : "⛶ 전체화면";
+      setTimeout(() => { if (state.crew.room) state.crew.room.resize(); }, 150);
+    });
+  }
 
   // ---------- 로그 ----------
   const logLineHtml = (l) => `<span class="ln ${l.ts ? l.level : "plain"}">${l.ts ? `<span class="ts">${esc(l.ts)}</span> ` : ""}${esc(l.msg)}</span>`;

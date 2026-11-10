@@ -171,13 +171,34 @@
         <select id="crew-repo" title="보고 싶은 레포의 크루 룸"></select>
         <label class="chk" title="데몬이 작업 중인 레포로 자동 전환"><input type="checkbox" id="crew-follow" checked> 활동 레포 따라가기</label>
         <span id="crew-roles" class="crew-roles"></span>
+
+        <!-- 공간 카메라 뷰 프리셋 -->
+        <div class="crew-btn-group" role="group" aria-label="시점 전환">
+          <button type="button" class="crew-btn active" id="crew-cam-overview" title="전체 공간 조망">🏛️ 전체</button>
+          <button type="button" class="crew-btn" id="crew-cam-meeting" title="메인 회의실 클로즈업">💼 회의실</button>
+          <button type="button" class="crew-btn" id="crew-cam-cafe" title="HERMES 카페 & 음료 바">☕ 카페·바</button>
+          <button type="button" class="crew-btn" id="crew-cam-lounge" title="릴랙스 힐링 라운지">🌿 라운지</button>
+        </div>
+
+        <!-- 에이전트 힐링 & 화합 인터랙션 모드 -->
+        <div class="crew-btn-group" role="group" aria-label="에이전트 인터랙션">
+          <button type="button" class="crew-btn crew-btn-accent" id="crew-btn-rest" title="AI 에이전트 커피 & 리프레시 휴식 모드">☕ 힐링 휴식</button>
+          <button type="button" class="crew-btn crew-btn-good" id="crew-btn-harmony" title="AI 에이전트 상호 경청 및 양보 회의 모드">🤝 상호 양보</button>
+        </div>
+
+        <!-- 콘텐츠 영역 확대 제어 -->
+        <div class="crew-btn-group" role="group" aria-label="화면 모드">
+          <button type="button" class="crew-btn" id="crew-btn-expand" title="3D 가상 공간을 넓게 확대하는 극장 모드">⛶ 극장 모드</button>
+          <button type="button" class="crew-btn" id="crew-btn-fullscreen" title="전체화면 전환">⛶ 전체화면</button>
+        </div>
+
         <span class="muted" id="crew-meta" style="margin-left:auto"></span>
       </div>
-      <div class="crew-layout">
+      <div class="crew-layout" id="crew-layout">
         <div class="crew-stage-wrap">
           <div id="crew-stage" class="crew-stage">
             <div class="crew-fallback" id="crew-fallback" hidden></div>
-            <div class="crew-hint">드래그로 회전 · 휠로 확대 · 아바타 클릭 = 그 역할의 발언만 보기</div>
+            <div class="crew-hint">드래그로 360° 회전 · 휠로 줌인/줌아웃 · 우클릭 이동 · 공간/가구/아바타 클릭 상호작용</div>
           </div>
           <div class="crew-status" id="crew-status"></div>
         </div>
