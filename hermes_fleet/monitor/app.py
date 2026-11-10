@@ -54,6 +54,16 @@ class ScheduleBody(BaseModel):
     poll_seconds: int | None = None
     endpoint_retry_seconds: int | None = None
 
+
+class EnhancementBody(BaseModel):
+    repo: str
+    brief: str
+    title: str = ""
+
+class ProjectBody(BaseModel):
+    name: str
+    description: str
+
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 
 
@@ -80,6 +90,15 @@ def create_app(collector: Collector | None = None) -> FastAPI:
     @app.get("/api/overview")
     def overview() -> dict[str, Any]:
         return col.overview()
+
+    @app.get("/api/system")
+    def system_metrics() -> dict[str, Any]:
+        """CPU/RAM 및 NVIDIA GPU 사용률의 현재값과 모니터 실행 중 이력."""
+        return col.system_metrics()
+
+    @app.get("/api/llm-usage")
+    def llm_usage() -> dict[str, Any]:
+        return col.llm_usage()
 
     @app.get("/api/repos")
     def repos(all: bool = Query(True, description="제외/비대상 레포 포함")) -> list[dict[str, Any]]:  # noqa: A002
@@ -150,6 +169,40 @@ def create_app(collector: Collector | None = None) -> FastAPI:
         if not ok:
             raise HTTPException(404, "pending request not found")
         return {"cancelled": request_id}
+
+    @app.get("/api/enhancements")
+    def enhancements(repo: str | None = None) -> list[dict[str, Any]]:
+        return col.enhancements(repo)
+
+    @app.get("/api/enhancements/{enhancement_id}")
+    def enhancement(enhancement_id: str) -> dict[str, Any]:
+        try:
+            return col.enhancement(enhancement_id)
+        except ValueError as exc:
+            raise HTTPException(404, str(exc)) from exc
+
+    @app.post("/api/enhancements")
+    def enhancement_create(body: EnhancementBody) -> dict[str, Any]:
+        """요구사항 원문을 저장하고 on-demand 데몬이 백로그로 분해할 요청을 큐에 넣는다."""
+        try:
+            return col.create_enhancement(body.repo, body.brief, body.title)
+        except PermissionError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+
+    @app.get("/api/projects")
+    def projects() -> list[dict[str, Any]]:
+        return col.projects()
+
+    @app.post("/api/projects")
+    def project_create(body: ProjectBody) -> dict[str, Any]:
+        try:
+            return col.create_project(body.name, body.description)
+        except PermissionError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
 
     @app.put("/api/pause")
     def pause_all(body: Paused) -> dict[str, Any]:

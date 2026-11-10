@@ -94,7 +94,9 @@ main { padding: 16px; max-width: 1880px; margin: 0 auto; }   /* FHD(1920) 기준
 .card-head { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
 .grid.two { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
 .grid.three { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 14px; }
+.grid.four { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px; }
 @media (max-width: 1100px) { .grid.three { grid-template-columns: 1fr; } }
+@media (max-width: 1200px) { .grid.four { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 @media (max-width: 900px) { .grid.two { grid-template-columns: 1fr; } }
 .grid .card { margin-bottom: 14px; }
 .chart-card { min-height: 300px; display: flex; flex-direction: column; }
@@ -462,6 +464,12 @@ dialog.modal[open] { animation: cmIn .18s ease-out; }
 #tab-overview > .grid .card { margin-bottom: 0; }
 .chart-card.compact { min-height: 210px; }
 .chart-card.compact .chart { min-height: 165px; }
+.system-usage { margin-bottom: var(--gap); }
+.section-head { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; margin-bottom: 8px; }
+.section-head h2 { margin: 0; }
+.system-chart { min-height: 174px; padding-bottom: 8px; }
+.system-chart .card-head strong { font: 600 18px/1 var(--mono); color: var(--text); }
+.system-chart .chart { min-height: 126px; }
 
 
 /* ===== 셸(LNB) — 레이아웃은 Tailwind 유틸리티(index.html). 여기는 Tailwind 로 표현할 수 없는 것과 CDN 실패 대비 최소 구조만. ===== */
@@ -595,3 +603,27 @@ dialog.modal { max-height: min(90vh, 100% - 32px - var(--footer-h)); }
 
 /* 레포 목록 카드 머리의 Jev 판정 버튼 */
 .head-actions { margin-left: auto; display: inline-flex; gap: 8px; align-items: center; }
+
+/* 레포별 기능 강화: 장문 요구사항 입력은 화면 안에서 카드 내부 스크롤을 사용한다. */
+#tab-enhance.active { min-height: 0; gap: var(--gap); }
+#tab-enhance > .card:first-child { flex: 0 0 auto; }
+#tab-enhance > .card:last-child { flex: 1; min-height: 0; margin-bottom: 0; display: flex; flex-direction: column; }
+#enhance-form { display: grid; gap: 12px; }
+#enhance-form label { display: grid; gap: 6px; font-size: 12px; font-weight: 700; color: var(--text-2); }
+#enhance-form input, #enhance-form select, #enhance-form textarea { width: 100%; box-sizing: border-box; color: var(--text); background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 7px 10px; font: inherit; font-size: 13px; }
+#enhance-form textarea { resize: vertical; min-height: 176px; max-height: 32vh; line-height: 1.55; }
+#enhance-form input:focus-visible, #enhance-form select:focus-visible, #enhance-form textarea:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+#enhance-form .form-actions { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+#enhance-list { flex: 1; overflow: auto; min-height: 80px; }
+#enhance-list .req { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+@media (max-width: 1023px) { #tab-enhance.active { height: auto; } #enhance-form { grid-template-columns: 1fr !important; } #enhance-form label[style] { grid-column: auto !important; } }
+
+/* LLM 사용체크: Canvas는 현재 선택 경로만 컬러·움직임으로 강조한다. */
+#tab-llm-usage.active { min-height: 0; gap: var(--gap); }
+.llm-usage-card { flex: 1; min-height: 360px; display: flex; flex-direction: column; margin-bottom: 0; }
+.llm-usage-card .card-head { flex: none; }
+.llm-usage-card .card-head p { margin: 4px 0 0; }
+.llm-flow-canvas { display: block; width: 100%; flex: 1; min-height: 280px; margin-top: 12px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface-2); }
+.llm-flow-fallback { padding: 14px; color: var(--critical); }
+.llm-usage-meta .card { margin-bottom: 0; }
+@media (max-width: 900px) { #tab-llm-usage.active { height: auto; } .llm-usage-card { min-height: 430px; } .llm-flow-canvas { min-height: 330px; } }

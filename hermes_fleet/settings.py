@@ -85,6 +85,7 @@ class Settings:
     temperature: float = 0.2
     max_iterations: int = 2
     shell_timeout: int = 900
+    use_role_overrides: bool = True
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -96,11 +97,17 @@ class Settings:
         if not base_url and provider == "ollama":
             host = detect_ollama_host()
             base_url = host if "://" in host else f"http://{host}"
+        # OpenRouter is also used by the optional Jev review service.  When
+        # the generation API key is left as the template value, reuse that
+        # configured OpenRouter key rather than silently sending "NA".
+        api_key = os.environ.get("HERMES_API_KEY", "").strip()
+        if provider != "ollama" and api_key in ("", "NA"):
+            api_key = os.environ.get("OPENROUTER_API_KEY", "NA").strip() or "NA"
         return cls(
             provider=provider,
             model=os.environ.get("HERMES_MODEL", "hermes3:8b"),
             base_url=(base_url or "http://localhost:11434").rstrip("/"),
-            api_key=os.environ.get("HERMES_API_KEY", "NA"),
+            api_key=api_key or "NA",
             temperature=float(os.environ.get("HERMES_TEMPERATURE", "0.2")),
             max_iterations=int(os.environ.get("HERMES_MAX_ITERATIONS", "2")),
             shell_timeout=int(os.environ.get("HERMES_SHELL_TIMEOUT", "900")),

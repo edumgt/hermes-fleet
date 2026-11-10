@@ -6,7 +6,7 @@
 <title>Hermes Fleet Monitor</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='14' fill='%233987e5'/%3E%3Cpath d='M9 17l5 5 9-11' stroke='white' stroke-width='3.5' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/variable/pretendardvariable-dynamic-subset.min.css">
-<link rel="stylesheet" href="style.css?v=20261108r">
+<link rel="stylesheet" href="style.css?v=20261110-llm-flow">
 <!-- Tailwind CSS v4 (정적 HTML 전용 Play CDN, 버전 고정). 셸(햄버거 + 오프캔버스 LNB)·새 컴포넌트는 Tailwind 유틸리티로 쓴다. 기존 CSS 변수는 @theme 으로 매핑. -->
 <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4.3.5"></script>
 <style type="text/tailwindcss">
@@ -58,10 +58,13 @@
       <li><button type="button" class="lnb-item relative flex w-full items-center gap-3 rounded-lg px-3 py-2 text-left text-[13.5px] text-ink-2 transition-colors duration-150 hover:bg-surface-2 hover:text-ink focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-accent aria-[current=page]:bg-accent/10 aria-[current=page]:text-ink aria-[current=page]:font-semibold group-data-[lnb=rail]/shell:mx-auto group-data-[lnb=rail]/shell:h-10 group-data-[lnb=rail]/shell:w-10 group-data-[lnb=rail]/shell:justify-center group-data-[lnb=rail]/shell:px-0" data-tab="workflow" data-label="워크플로"><svg class="ic" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" ><circle cx="6" cy="6" r="3"/><circle cx="18" cy="18" r="3"/><path d="M6 9v3a3 3 0 0 0 3 3h6"/><path d="M12 15l3-3m-3 3l3 3"/></svg><span class="lb truncate group-data-[lnb=rail]/shell:hidden">워크플로</span></button></li>
       <li><button type="button" class="lnb-item relative flex w-full items-center gap-3 rounded-lg px-3 py-2 text-left text-[13.5px] text-ink-2 transition-colors duration-150 hover:bg-surface-2 hover:text-ink focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-accent aria-[current=page]:bg-accent/10 aria-[current=page]:text-ink aria-[current=page]:font-semibold group-data-[lnb=rail]/shell:mx-auto group-data-[lnb=rail]/shell:h-10 group-data-[lnb=rail]/shell:w-10 group-data-[lnb=rail]/shell:justify-center group-data-[lnb=rail]/shell:px-0" data-tab="crew" data-label="크루 룸"><svg class="ic" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" ><circle cx="9" cy="7" r="4"/><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/><path d="M21 21v-2a4 4 0 0 0-3-3.87"/></svg><span class="lb truncate group-data-[lnb=rail]/shell:hidden">크루 룸</span><span class="lnb-live ml-auto h-2 w-2 rounded-full bg-good shadow-[0_0_0_3px_color-mix(in_srgb,var(--good)_25%,transparent)] group-data-[lnb=rail]/shell:hidden" id="lnb-live-crew" hidden title="작업 진행 중"></span></button></li>
       <li><button type="button" class="lnb-item relative flex w-full items-center gap-3 rounded-lg px-3 py-2 text-left text-[13.5px] text-ink-2 transition-colors duration-150 hover:bg-surface-2 hover:text-ink focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-accent aria-[current=page]:bg-accent/10 aria-[current=page]:text-ink aria-[current=page]:font-semibold group-data-[lnb=rail]/shell:mx-auto group-data-[lnb=rail]/shell:h-10 group-data-[lnb=rail]/shell:w-10 group-data-[lnb=rail]/shell:justify-center group-data-[lnb=rail]/shell:px-0" data-tab="repos" data-label="레포 목록"><svg class="ic" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" ><path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/></svg><span class="lb truncate group-data-[lnb=rail]/shell:hidden">레포 목록</span></button></li>
+      <li><button type="button" class="lnb-item relative flex w-full items-center gap-3 rounded-lg px-3 py-2 text-left text-[13.5px] text-ink-2 transition-colors duration-150 hover:bg-surface-2 hover:text-ink focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-accent aria-[current=page]:bg-accent/10 aria-[current=page]:text-ink aria-[current=page]:font-semibold group-data-[lnb=rail]/shell:mx-auto group-data-[lnb=rail]/shell:h-10 group-data-[lnb=rail]/shell:w-10 group-data-[lnb=rail]/shell:justify-center group-data-[lnb=rail]/shell:px-0" data-tab="enhance" data-label="기능 강화"><svg class="ic" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v18M3 12h18"/><path d="M5 5h4M15 19h4"/></svg><span class="lb truncate group-data-[lnb=rail]/shell:hidden">기능 강화</span></button></li>
+      <li><button type="button" class="lnb-item relative flex w-full items-center gap-3 rounded-lg px-3 py-2 text-left text-[13.5px] text-ink-2 transition-colors duration-150 hover:bg-surface-2 hover:text-ink focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-accent aria-[current=page]:bg-accent/10 aria-[current=page]:text-ink aria-[current=page]:font-semibold group-data-[lnb=rail]/shell:mx-auto group-data-[lnb=rail]/shell:h-10 group-data-[lnb=rail]/shell:w-10 group-data-[lnb=rail]/shell:justify-center group-data-[lnb=rail]/shell:px-0" data-tab="projects" data-label="신규 프로젝트"><svg class="ic" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v18M3 12h18"/><path d="M5 7h14v12H5z"/></svg><span class="lb truncate group-data-[lnb=rail]/shell:hidden">신규 프로젝트</span></button></li>
       <li><button type="button" class="lnb-item relative flex w-full items-center gap-3 rounded-lg px-3 py-2 text-left text-[13.5px] text-ink-2 transition-colors duration-150 hover:bg-surface-2 hover:text-ink focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-accent aria-[current=page]:bg-accent/10 aria-[current=page]:text-ink aria-[current=page]:font-semibold group-data-[lnb=rail]/shell:mx-auto group-data-[lnb=rail]/shell:h-10 group-data-[lnb=rail]/shell:w-10 group-data-[lnb=rail]/shell:justify-center group-data-[lnb=rail]/shell:px-0" data-tab="repo" data-label="레포 상세"><svg class="ic" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" ><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/><path d="M8 14h8M12 10v8"/></svg><span class="lb truncate group-data-[lnb=rail]/shell:hidden">레포 상세</span></button></li>
       <li><button type="button" class="lnb-item relative flex w-full items-center gap-3 rounded-lg px-3 py-2 text-left text-[13.5px] text-ink-2 transition-colors duration-150 hover:bg-surface-2 hover:text-ink focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-accent aria-[current=page]:bg-accent/10 aria-[current=page]:text-ink aria-[current=page]:font-semibold group-data-[lnb=rail]/shell:mx-auto group-data-[lnb=rail]/shell:h-10 group-data-[lnb=rail]/shell:w-10 group-data-[lnb=rail]/shell:justify-center group-data-[lnb=rail]/shell:px-0" data-tab="tickets" data-label="티켓"><svg class="ic" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" ><path d="M2 9a3 3 0 0 1 0 6v2a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-2a3 3 0 0 1 0-6V7a2 2 0 0 0-2-2H4a2 2 0 0 0-2 2Z"/><path d="M13 5v2M13 17v2M13 11v2"/></svg><span class="lb truncate group-data-[lnb=rail]/shell:hidden">티켓</span><span class="lnb-badge ml-auto rounded-full bg-accent/15 px-1.5 text-[10.5px] font-semibold leading-[18px] text-accent tabular-nums group-data-[lnb=rail]/shell:hidden" id="lnb-badge-tickets" hidden></span></button></li>
       <li><button type="button" class="lnb-item relative flex w-full items-center gap-3 rounded-lg px-3 py-2 text-left text-[13.5px] text-ink-2 transition-colors duration-150 hover:bg-surface-2 hover:text-ink focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-accent aria-[current=page]:bg-accent/10 aria-[current=page]:text-ink aria-[current=page]:font-semibold group-data-[lnb=rail]/shell:mx-auto group-data-[lnb=rail]/shell:h-10 group-data-[lnb=rail]/shell:w-10 group-data-[lnb=rail]/shell:justify-center group-data-[lnb=rail]/shell:px-0" data-tab="timeline" data-label="타임라인"><svg class="ic" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" ><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M12 7v5l4 2"/></svg><span class="lb truncate group-data-[lnb=rail]/shell:hidden">타임라인</span></button></li>
       <li><button type="button" class="lnb-item relative flex w-full items-center gap-3 rounded-lg px-3 py-2 text-left text-[13.5px] text-ink-2 transition-colors duration-150 hover:bg-surface-2 hover:text-ink focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-accent aria-[current=page]:bg-accent/10 aria-[current=page]:text-ink aria-[current=page]:font-semibold group-data-[lnb=rail]/shell:mx-auto group-data-[lnb=rail]/shell:h-10 group-data-[lnb=rail]/shell:w-10 group-data-[lnb=rail]/shell:justify-center group-data-[lnb=rail]/shell:px-0" data-tab="logs" data-label="로그"><svg class="ic" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" ><path d="m4 17 6-6-6-6"/><path d="M12 19h8"/></svg><span class="lb truncate group-data-[lnb=rail]/shell:hidden">로그</span></button></li>
+      <li><button type="button" class="lnb-item relative flex w-full items-center gap-3 rounded-lg px-3 py-2 text-left text-[13.5px] text-ink-2 transition-colors duration-150 hover:bg-surface-2 hover:text-ink focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-accent aria-[current=page]:bg-accent/10 aria-[current=page]:text-ink aria-[current=page]:font-semibold group-data-[lnb=rail]/shell:mx-auto group-data-[lnb=rail]/shell:h-10 group-data-[lnb=rail]/shell:w-10 group-data-[lnb=rail]/shell:justify-center group-data-[lnb=rail]/shell:px-0" data-tab="llm-usage" data-label="LLM 사용체크"><svg class="ic" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M7 15v2m4-6v6m4-10v10"/></svg><span class="lb truncate group-data-[lnb=rail]/shell:hidden">LLM 사용체크</span></button></li>
     </ul>
   </nav>
   <div class="shrink-0 border-t border-line p-2">
@@ -99,6 +102,16 @@
         <div class="chart" id="ch-daily"></div>
       </div>
     </div>
+
+    <section class="system-usage" aria-labelledby="system-usage-title">
+      <div class="section-head"><h2 id="system-usage-title">시스템 사용량</h2><span class="muted" id="system-note">10초마다 갱신</span></div>
+      <div class="grid four">
+        <div class="card chart-card system-chart"><div class="card-head"><h2>CPU</h2><strong id="sys-cpu-value">-</strong></div><div class="chart" id="ch-sys-cpu"></div></div>
+        <div class="card chart-card system-chart"><div class="card-head"><h2>GPU</h2><strong id="sys-gpu-value">-</strong></div><div class="chart" id="ch-sys-gpu"></div></div>
+        <div class="card chart-card system-chart"><div class="card-head"><h2>GPU 메모리</h2><strong id="sys-gpu-memory-value">-</strong></div><div class="chart" id="ch-sys-gpu-memory"></div></div>
+        <div class="card chart-card system-chart"><div class="card-head"><h2>CPU 메모리</h2><strong id="sys-memory-value">-</strong></div><div class="chart" id="ch-sys-memory"></div></div>
+      </div>
+    </section>
 
     <div class="grid two" id="ctl-grid">
       <div class="card">
@@ -143,6 +156,44 @@
         </span>
       </div>
       <div id="grid-repos" class="grid-box repos"></div>
+    </div>
+  </section>
+
+  <!-- ===== LLM 사용체크 ===== -->
+  <section id="tab-llm-usage" class="panel">
+    <div class="card llm-usage-card">
+      <div class="card-head"><div><h2>LLM 사용 경로</h2><p class="muted">OpenRouter → Jev → 내부 또는 외부 생성 LLM → 현재 작업 · 10초 자동 갱신</p></div><span class="pill" id="llm-route-pill">확인 중</span></div>
+      <canvas id="llm-flow-canvas" class="llm-flow-canvas" role="img" aria-label="OpenRouter, Jev, 내부 또는 외부 LLM, 현재 작업의 사용 경로"></canvas>
+      <div class="llm-flow-fallback" id="llm-flow-fallback" hidden></div>
+    </div>
+    <div class="grid three llm-usage-meta">
+      <div class="card"><h2>내부 LLM</h2><dl class="kv" id="llm-local-kv"></dl></div>
+      <div class="card"><h2>외부 LLM</h2><dl class="kv" id="llm-external-kv"></dl></div>
+      <div class="card"><h2>최근 선택</h2><dl class="kv" id="llm-last-kv"></dl></div>
+    </div>
+  </section>
+
+  <!-- ===== 워크플로 ===== -->
+  <section id="tab-projects" class="panel">
+    <div class="card"><div class="card-head"><div><h2>신규 프로젝트 생성</h2><p class="muted">로컬 `/home/ubuntu` 저장소와 비공개 GitHub 원격을 만들고, 설명을 기준으로 Hermes 첫 구현 작업을 시작합니다.</p></div></div>
+      <form id="project-form" class="form-grid" style="grid-template-columns:minmax(220px,.45fr) minmax(0,1fr)"><label>저장소 이름<input id="project-name" required pattern="[a-z][a-z0-9-]{1,62}" placeholder="academy-lms-v1"></label><label style="grid-row:span 2">프로젝트 설명<textarea id="project-description" required minlength="40" maxlength="60000" rows="10" placeholder="목표, 사용자, 핵심 기능, 기술·데이터·보안 조건을 입력하세요."></textarea></label><div class="form-actions"><button class="btn primary" type="submit">생성 · 비공개 GitHub 구성 · 작업 시작</button></div></form>
+    </div><div class="card"><div class="card-head"><h2>생성 이력</h2></div><div id="project-list" class="req-list"></div></div>
+  </section>
+
+  <!-- ===== 워크플로 ===== -->
+  <section id="tab-enhance" class="panel">
+    <div class="card">
+      <div class="card-head"><div><h2>레포별 기능 강화 프로젝트</h2><p class="muted">장문의 요구사항을 저장하고, Hermes가 실제 저장소 구조에 맞는 승인 대기 티켓으로 분해합니다.</p></div></div>
+      <form id="enhance-form" class="form-grid" style="grid-template-columns: minmax(220px, .45fr) minmax(0, 1fr);">
+        <label>대상 레포<select id="enhance-repo" required></select></label>
+        <label>프로젝트 제목 <input id="enhance-title" maxlength="80" placeholder="예: 중등 영어학원 통합 LMS V1"></label>
+        <label style="grid-column: 1 / -1">요구사항 원문<textarea id="enhance-brief" required minlength="40" maxlength="60000" rows="14" placeholder="프로젝트 개요, 사용자 역할, 업무 흐름, 필수 기능, 연동·데이터·보안·검수 기준을 그대로 붙여 넣으세요."></textarea></label>
+        <div class="form-actions" style="grid-column: 1 / -1"><button type="submit" class="btn primary" id="enhance-submit">요구사항 분석 · 티켓 생성</button><span class="muted">원문 등록만으로 코드를 수정하지 않습니다. 생성된 티켓을 검토·승인한 뒤에만 구현합니다.</span></div>
+      </form>
+    </div>
+    <div class="card">
+      <div class="card-head"><h2>기능 강화 프로젝트 이력</h2><span class="muted" id="enhance-count"></span></div>
+      <div id="enhance-list" class="req-list"></div>
     </div>
   </section>
 
@@ -343,6 +394,12 @@
   </div>
 </dialog>
 
+<!-- 기능 강화 요구사항 원문 (상세 출력 → 모달) -->
+<dialog id="artifact-dialog" class="modal xl" aria-labelledby="artifact-title">
+  <div class="modal-head"><div><h2 id="artifact-title">요구사항 원문</h2><span id="artifact-meta" class="muted"></span></div><button type="button" class="ghost close" data-close>닫기</button></div>
+  <pre id="artifact-body" class="log" style="max-height:65vh; white-space:pre-wrap"></pre>
+</dialog>
+
 <!-- 확인 모달 (브라우저 confirm 대체) -->
 <dialog id="confirm-dialog" class="modal sm" aria-labelledby="confirm-title">
   <form method="dialog">
@@ -354,6 +411,6 @@
 <!-- 전역 고정 푸터: 높이 10px, 검정, EDUMGT (FE 가이드 규정) -->
 <footer class="site-footer" role="contentinfo"><span>EDUMGT</span></footer>
 <div id="toast" class="toast" hidden></div>
-<script src="app.js?v=20261108r"></script>
+<script src="app.js?v=20261110-llm-flow"></script>
 </body>
 </html>

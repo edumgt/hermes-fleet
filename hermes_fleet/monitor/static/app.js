@@ -7,7 +7,7 @@
   const STAGES = ["pm", "design", "dev", "qa"];
   const STAGE_KO = { pm: "PM", design: "디자인", dev: "개발", qa: "QA" };
   const REFRESH_MS = 10000;
-  const state = { overview: null, stats: null, repos: [], tickets: [], tab: "overview", es: null, logLines: [], repo: null, repoDetail: null, grids: {}, charts: {}, skew: 0 , crew: { es: null, rooms: [], messages: [], repo: "", role: "", room: null, daemon: null, ready: false } };
+  const state = { overview: null, stats: null, system: null, llmUsage: null, repos: [], tickets: [], enhancements: [], tab: "overview", es: null, logLines: [], repo: null, repoDetail: null, grids: {}, charts: {}, skew: 0, crew: { es: null, rooms: [], messages: [], repo: "", role: "", room: null, daemon: null, ready: false } };
 
   // ---------- 유틸 ----------
   const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -224,11 +224,13 @@
     destroyCharts();
     Object.values(state.grids).forEach((g) => g.setGridOption("theme", gridTheme()));
     if (state.overview) renderOverview(state.overview);
+    if (state.system) renderSystemCharts(state.system);
+    if (state.llmUsage && state.tab === "llm-usage") renderLlmUsage(state.llmUsage);
     if (state.tab === "repo" && state.repoDetail) renderRepo(state.repoDetail);
     if (state.crew && state.crew.room) { state.crew.room.refreshTheme(); renderCrew(true); }
   }
-  const TAB_TITLE = { overview: "개요", workflow: "워크플로", crew: "크루 룸", repos: "레포 목록", repo: "레포 상세", tickets: "티켓", timeline: "타임라인", logs: "로그" };
-  const TAB_SUB = { overview: "플릿 상태와 제어", workflow: "레포별 전달 체인", crew: "역할별 AI 작업 현황", repos: "대상 선택 · 승인 모드 · 제어", repo: "저장소 하나를 깊게", tickets: "백로그와 상세", timeline: "최근 활동", logs: "daemon.log 실시간" };
+  const TAB_TITLE = { overview: "개요", "llm-usage": "LLM 사용체크", workflow: "워크플로", crew: "크루 룸", repos: "레포 목록", enhance: "기능 강화", projects: "신규 프로젝트", repo: "레포 상세", tickets: "티켓", timeline: "타임라인", logs: "로그" };
+  const TAB_SUB = { overview: "플릿 상태와 제어", "llm-usage": "동적 모델 라우팅과 현재 작업", workflow: "레포별 전달 체인", crew: "역할별 AI 작업 현황", repos: "대상 선택 · 승인 모드 · 제어", enhance: "장문 요구사항을 레포별 실행 티켓으로 전환", projects: "로컬 저장소 · private GitHub · Hermes 첫 작업", repo: "저장소 하나를 깊게", tickets: "백로그와 상세", timeline: "최근 활동", logs: "daemon.log 실시간" };
 
   function showTab(name) {
     if (!TAB_TITLE[name]) return;
@@ -245,12 +247,92 @@
     if (name === "tickets") loadTickets();
     if (name === "repo") { if (state.repo) loadRepo(state.repo); else { $("#r-empty").hidden = false; fillRepoSelect(); } }
     if (name === "workflow") loadWorkflow();
+    if (name === "enhance") loadEnhancements();
+    if (name === "projects") loadProjects();
+    if (name === "llm-usage") loadLlmUsage();
     if (name === "repos" && state.overview) { renderRepoGrid(state.overview.repos); if (state.grids.repos) setTimeout(() => state.grids.repos.setGridOption("rowData", state.overview.repos), 50); }
     if (name === "crew") startCrew();
     if (state.crew.room) state.crew.room.setActive(name === "crew");
   }
   $$(".lnb-item[data-tab]").forEach((b) => b.addEventListener("click", () => showTab(b.dataset.tab)));   // 테마/설정 버튼도 .lnb-item 이므로 data-tab 있는 것만
   initLnb();
+
+  // ---------- LLM 사용체크: Canvas 라우팅 흐름 ----------
+  function loadLlmUsage() { api("/api/llm-usage").then((d) => { state.llmUsage = d; renderLlmUsage(d); }).catch((e) => toast(`LLM 사용 정보 조회 실패: ${e.message}`)); }
+  function renderLlmUsage(data) {
+    const r = data.routing, last = data.last_route, activity = data.activity, route = last?.route || "pending";
+    $("#llm-route-pill").textContent = route === "local" ? "내부 LLM 사용" : route === "external" ? "외부 LLM 사용" : "새 작업 대기";
+    $("#llm-route-pill").className = `pill ${route === "local" ? "ok" : route === "external" ? "bad" : ""}`;
+    kv("#llm-local-kv", [["모델", esc(r.local.model)], ["엔드포인트", esc(r.local.base_url)], ["조건", `GPU < ${r.gpu_max_percent}% · VRAM < ${r.gpu_memory_max_percent}%`]]);
+    kv("#llm-external-kv", [["모델", esc(r.external.model)], ["엔드포인트", esc(r.external.base_url)], ["Jev", `${esc(data.jev.provider)} / ${esc(data.jev.model)}`]]);
+    kv("#llm-last-kv", [["경로", esc(last?.route || "아직 선택 없음")], ["시각", fmtTs(last?.at)], ["사유", esc(last?.reason || "새 생성 작업 시작 시 선택")], ["현재 작업", activity ? esc(`${activity.repo} · ${activity.id || activity.kind}`) : "대기 중"]]);
+    drawLlmFlow(data, performance.now());
+  }
+  function drawLlmFlow(data, timestamp) {
+    const canvas = $("#llm-flow-canvas"), fallback = $("#llm-flow-fallback"), ctx = canvas.getContext("2d");
+    if (!ctx) { fallback.hidden = false; fallback.textContent = "Canvas를 사용할 수 없어 LLM 흐름을 표시할 수 없습니다."; return; }
+    const rect = canvas.getBoundingClientRect(); if (!rect.width || !rect.height) { requestAnimationFrame((t) => drawLlmFlow(data, t)); return; }
+    const dpr = window.devicePixelRatio || 1, w = Math.round(rect.width * dpr), h = Math.round(rect.height * dpr);
+    if (canvas.width !== w || canvas.height !== h) { canvas.width = w; canvas.height = h; }
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0); ctx.clearRect(0, 0, rect.width, rect.height);
+    const pal = palette(), active = data.last_route?.route || "";
+    const nodes = { router: [rect.width * .12, rect.height * .35, "OpenRouter", "외부 AI 게이트웨이"], jev: [rect.width * .36, rect.height * .35, "Jev", "프로젝트 판정"], local: [rect.width * .63, rect.height * .18, "내부 LLM", data.routing.local.model], external: [rect.width * .63, rect.height * .60, "외부 LLM", data.routing.external.model], work: [rect.width * .88, rect.height * .39, "현재 작업", data.activity ? `${data.activity.repo} · ${data.activity.id || data.activity.kind}` : "대기 중"] };
+    const edge = (from, to, on, color) => { const a = nodes[from], b = nodes[to]; ctx.strokeStyle = on ? color : pal.grid; ctx.lineWidth = on ? 2.5 : 1.25; ctx.setLineDash(on ? [] : [5, 6]); ctx.beginPath(); ctx.moveTo(a[0] + 58, a[1]); ctx.lineTo(b[0] - 58, b[1]); ctx.stroke(); ctx.setLineDash([]); if (on) { const p = ((timestamp || 0) / 1200) % 1, x = a[0] + 58 + (b[0] - a[0] - 116) * p, y = a[1] + (b[1] - a[1]) * p; ctx.fillStyle = color; ctx.beginPath(); ctx.arc(x, y, 4, 0, Math.PI * 2); ctx.fill(); } };
+    edge("router", "jev", true, pal.stages[3]); edge("jev", "local", active === "local", pal.stages[2]); edge("jev", "external", active === "external", pal.stages[1]); edge("local", "work", active === "local", pal.stages[2]); edge("external", "work", active === "external", pal.stages[1]);
+    Object.entries(nodes).forEach(([key, n]) => { const selected = (key === "local" && active === "local") || (key === "external" && active === "external") || key === "jev"; const color = key === "local" ? pal.stages[2] : key === "external" ? pal.stages[1] : key === "jev" ? pal.stages[3] : pal.stages[0]; ctx.fillStyle = selected ? color : pal.surface; ctx.strokeStyle = color; ctx.lineWidth = selected ? 2 : 1; ctx.beginPath(); ctx.roundRect(n[0] - 58, n[1] - 28, 116, 56, 10); ctx.fill(); ctx.stroke(); ctx.fillStyle = selected ? "#fff" : pal.text; ctx.font = "600 13px Pretendard Variable, sans-serif"; ctx.textAlign = "center"; ctx.fillText(n[2], n[0], n[1] - 4); ctx.fillStyle = selected ? "rgba(255,255,255,.84)" : pal.muted; ctx.font = "11px Pretendard Variable, sans-serif"; ctx.fillText(String(n[3]).slice(0, 18), n[0], n[1] + 14); });
+    if (state.tab === "llm-usage" && !document.hidden) requestAnimationFrame((t) => drawLlmFlow(data, t));
+  }
+
+  // ---------- 레포별 기능 강화 ----------
+  function fillEnhanceRepos() {
+    const sel = $("#enhance-repo");
+    if (!sel) return;
+    // overview의 eligible은 "FE/BE 탐지"가 아니라 Fleet 작업 대상으로
+    // 정규화된 값이다. (repos API의 fe_be_ok와 구분)
+    const selected = state.overview?.repos?.filter((r) => r.eligible) || [];
+    const previous = sel.value;
+    sel.innerHTML = selected.length ? selected.map((r) => `<option value="${esc(r.name)}">${esc(r.name)}</option>`).join("") : `<option value="">선택된 작업 레포가 없습니다</option>`;
+    if (selected.some((r) => r.name === previous)) sel.value = previous;
+  }
+  function enhancementStatus(s) {
+    return ({ draft: badge("등록됨"), planning: badge("분석 중", "serious"), ready: badge("승인 대기", "good"), failed: badge("분석 실패", "crit") })[s] || badge(s || "-");
+  }
+  function renderEnhancements(items) {
+    state.enhancements = items || [];
+    const target = $("#enhance-list"); if (!target) return;
+    $("#enhance-count").textContent = `${state.enhancements.length}건`;
+    target.innerHTML = state.enhancements.length ? state.enhancements.map((p) => `<article class="req done"><div><strong>${esc(p.title)}</strong> ${enhancementStatus(p.status)}<div class="muted">${esc(p.repo)} · ${esc(fmtTs(p.updated_at || p.created_at))} · ${esc((p.tickets || []).join(", ") || "티켓 생성 대기")}</div>${p.error ? `<div class="c-crit">${esc(p.error)}</div>` : ""}</div><button type="button" class="btn sm" data-enhance-open="${esc(p.id)}">원문 보기</button></article>`).join("") : `<div class="empty">등록된 기능 강화 프로젝트가 없습니다.</div>`;
+    $$('[data-enhance-open]', target).forEach((b) => b.addEventListener("click", async () => {
+      try { const p = await api(`/api/enhancements/${encodeURIComponent(b.dataset.enhanceOpen)}`); openEnhancementDetail(p); } catch (e) { toast(`불러오기 실패: ${e.message}`); }
+    }));
+  }
+  async function loadEnhancements() {
+    fillEnhanceRepos();
+    try { renderEnhancements(await api("/api/enhancements")); } catch (e) { toast(`기능 강화 이력 조회 실패: ${e.message}`); }
+  }
+  function openEnhancementDetail(p) {
+    const d = $("#artifact-dialog");
+    $("#artifact-title").textContent = `요구사항 원문 · ${p.title}`;
+    $("#artifact-meta").textContent = `${p.repo} · ${p.id} · ${fmtTs(p.created_at)}`;
+    $("#artifact-body").textContent = p.brief || "";
+    openDialog(d);
+  }
+  $("#enhance-form")?.addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    const repo = $("#enhance-repo").value, title = $("#enhance-title").value.trim(), brief = $("#enhance-brief").value.trim();
+    if (!repo || brief.length < 40) { toast("대상 레포와 40자 이상의 요구사항을 입력하세요."); return; }
+    const ok = await confirmModal(`'${repo}' 레포에 기능 강화 프로젝트를 등록하고 분석 큐에 넣을까요?\n코드 변경은 생성된 티켓을 승인한 뒤에만 진행됩니다.`, { title: "요구사항 분석 요청", ok: "등록 · 분석 요청", danger: false });
+    if (!ok) return;
+    const btn = $("#enhance-submit"); btn.disabled = true;
+    try {
+      const res = await api("/api/enhancements", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ repo, title, brief }) });
+      $("#enhance-title").value = ""; $("#enhance-brief").value = "";
+      toast(`${res.enhancement.id} 분석 요청을 큐에 등록했습니다.`, true);
+      await refresh(); await loadEnhancements();
+    } catch (e) { toast(`등록 실패: ${e.message}`); } finally { btn.disabled = false; }
+  });
+  async function loadProjects() { try { const rows=await api("/api/projects"); $("#project-list").innerHTML=rows.length?rows.map((p)=>`<article class="req done"><div><strong>${esc(p.name)}</strong> ${badge({queued:"대기",creating:"생성 중",ready:"작업 중",failed:"실패"}[p.status]||p.status,p.status==="failed"?"crit":"")}<div class="muted">${esc(p.path||"/home/ubuntu/"+p.name)} · ${esc(p.ticket||"")}</div>${p.error?`<div class="c-crit">${esc(p.error)}</div>`:""}</div></article>`).join(""):`<div class="empty">생성 이력이 없습니다.</div>`; } catch(e){toast(`프로젝트 조회 실패: ${e.message}`);} }
+  $("#project-form")?.addEventListener("submit",async(ev)=>{ev.preventDefault();const name=$("#project-name").value.trim(),description=$("#project-description").value.trim();const ok=await confirmModal(`'${name}' 로컬 저장소와 비공개 GitHub 저장소를 생성하고 Hermes 작업을 시작할까요?`,{title:"신규 프로젝트 생성",ok:"생성 · 작업 시작",danger:false});if(!ok)return;try{const r=await api("/api/projects",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({name,description})});toast(`${r.project.name} 생성 요청을 등록했습니다.`,true);$("#project-form").reset();await loadProjects();}catch(e){toast(`생성 요청 실패: ${e.message}`);}});
 
   // ---------- 개요 ----------
   function daemonView(d, sch) {
@@ -554,6 +636,34 @@
       const any = days.some((d) => d.PASS || d.FAIL || d.ERROR || d.merged);
       renderChart("daily", $("#ch-daily"), dailyChart(days, pal, 170), any ? null : "최근 14일 처리 기록이 없습니다.");
     }
+  }
+
+  function renderSystemCharts(metrics) {
+    const pal = palette();
+    const history = metrics.history || [];
+    const labels = history.map((p) => String(p.at || "").slice(11, 16));
+    const draw = (key, selector, valueSelector, label, color, empty) => {
+      const values = history.map((p) => p[valueSelector]);
+      const hasData = values.some((v) => typeof v === "number");
+      renderChart(key, $(selector), deep(baseChart("area", 126), {
+        colors: [color], series: [{ name: label, data: values }],
+        chart: { sparkline: { enabled: true } },
+        stroke: { width: 2, curve: "smooth" }, fill: { type: "solid", opacity: .16 },
+        xaxis: { categories: labels }, yaxis: { min: 0, max: 100, labels: { show: false } },
+        tooltip: { x: { formatter: (_v, ctx) => labels[ctx.dataPointIndex] || "" }, y: { formatter: (v) => `${Number(v).toFixed(1)}%` } },
+      }), hasData ? null : empty);
+    };
+    const sample = metrics.sample || {};
+    const percent = (v) => typeof v === "number" ? `${v.toFixed(1)}%` : "-";
+    $("#sys-cpu-value").textContent = percent(sample.cpu);
+    $("#sys-memory-value").textContent = percent(sample.memory);
+    $("#sys-gpu-value").textContent = percent(sample.gpu);
+    $("#sys-gpu-memory-value").textContent = percent(sample.gpu_memory);
+    $("#system-note").textContent = metrics.gpu_available ? (metrics.retention || "10초마다 갱신") : (metrics.gpu_note || "10초마다 갱신");
+    draw("sys-cpu", "#ch-sys-cpu", "cpu", "CPU", pal.stages[0], "다음 갱신부터 CPU 이력이 표시됩니다.");
+    draw("sys-memory", "#ch-sys-memory", "memory", "CPU 메모리", pal.stages[2], "CPU 메모리 정보를 읽을 수 없습니다.");
+    draw("sys-gpu", "#ch-sys-gpu", "gpu", "GPU", pal.stages[1], metrics.gpu_note || "GPU 정보를 읽을 수 없습니다.");
+    draw("sys-gpu-memory", "#ch-sys-gpu-memory", "gpu_memory", "GPU 메모리", pal.stages[3], metrics.gpu_note || "GPU 정보를 읽을 수 없습니다.");
   }
 
   function dailyChart(days, pal, height = 260) {
@@ -1237,12 +1347,14 @@
   // ---------- 메인 루프 ----------
   async function refresh() {
     try {
-      const [o, st, wf] = await Promise.all([api("/api/overview"), api("/api/stats").catch(() => null), state.workflowTotals ? Promise.resolve(null) : api("/api/workflow").catch(() => null)]);
+      const [o, st, sy, lu, wf] = await Promise.all([api("/api/overview"), api("/api/stats").catch(() => null), api("/api/system").catch(() => null), api("/api/llm-usage").catch(() => null), state.workflowTotals ? Promise.resolve(null) : api("/api/workflow").catch(() => null)]);
       if (wf) state.workflowTotals = wf.totals;
-      state.overview = o; state.stats = st; state.repos = o.repos;
+      state.overview = o; state.stats = st; state.system = sy; state.llmUsage = lu; state.repos = o.repos;
       const serverNow = new Date(String(o.now)).getTime();
       if (isFinite(serverNow)) state.skew = serverNow - Date.now();
       renderOverview(o);
+      if (sy) renderSystemCharts(sy);
+      if (lu && state.tab === "llm-usage") renderLlmUsage(lu);
       const lsel = $("#l-repo"), cur = lsel.value;
       lsel.innerHTML = `<option value="">모든 레포</option>` + o.repos.filter((r) => r.fe_be_ok).map((r) => `<option${r.name === cur ? " selected" : ""}>${esc(r.name)}</option>`).join("");
       $("#conn").textContent = `갱신 ${kstTime(Date.now(), true)}`;
@@ -1264,5 +1376,5 @@
   const hash = location.hash.replace("#", "");
   if (hash.startsWith("repo=")) state.repo = decodeURIComponent(hash.slice(5));
   const initial = hash.startsWith("repo=") ? "repo" : hash;
-  refresh().then(() => showTab(["overview", "workflow", "crew", "repos", "repo", "tickets", "timeline", "logs"].includes(initial) ? initial : "overview"));
+  refresh().then(() => showTab(["overview", "llm-usage", "workflow", "crew", "repos", "enhance", "projects", "repo", "tickets", "timeline", "logs"].includes(initial) ? initial : "overview"));
 })();

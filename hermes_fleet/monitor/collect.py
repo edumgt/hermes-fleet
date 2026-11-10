@@ -13,12 +13,15 @@ import os
 import re
 import subprocess
 import time
+from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
 from ..backlog import VALID_STATUS, Ticket, TicketError, load_tickets
 from .. import requests as rq
+from .. import enhancements as eh
+from .. import projects as pj
 from ..fleetfile import SCHEDULE_KEYS, FleetFileError, is_selected, set_repo_selected, update_approval, update_calendar, update_schedule
 from ..llm import check_endpoint
 from .. import jev, review as rv
@@ -26,6 +29,7 @@ import threading
 from ..merge import list_ticket_branches, ticket_on_branch
 from ..org import load_org_for, load_template
 from ..repos import FleetConfig, RepoProfile, detect_profile
+from ..routing import ModelRouter
 from ..schedule import Schedule, parse_clock
 from ..settings import FLEET_DIR, REPO_WORKSPACE_DIR, Settings, load_dotenv
 from ..tools import git
@@ -257,6 +261,8 @@ class Collector:
         self._review_lock = threading.Lock()
         self._review_thread: threading.Thread | None = None
         self._review_cache: tuple[float, dict[str, Any]] | None = None
+        self._system_history: deque[dict[str, Any]] = deque(maxlen=360)
+        self._previous_cpu: tuple[int, int] | None = None
 
     @classmethod
     def from_env(cls) -> "Collector":
@@ -273,6 +279,71 @@ class Collector:
 
     def initialized(self) -> bool:
         return self.paths.config.exists()
+
+    # ----- 시스템 사용량 -----
+    def system_metrics(self) -> dict[str, Any]:
+        """호스트의 CPU/RAM 및 NVIDIA GPU 사용률을 수집한다.
+
+        psutil 같은 추가 패키지는 쓰지 않는다. CPU는 /proc/stat 두 스냅샷의
+        차이로, 메모리는 MemAvailable 기준으로 계산하며, GPU가 없거나
+        nvidia-smi를 쓸 수 없는 환경도 정상적인 빈 데이터로 반환한다.
+        """
+        cpu = self._cpu_percent()
+        memory = self._memory_percent()
+        gpu, gpu_memory, gpu_note = self._gpu_metrics()
+        sample = {
+            "at": self.now().strftime("%Y-%m-%dT%H:%M:%S"),
+            "cpu": cpu,
+            "memory": memory,
+            "gpu": gpu,
+            "gpu_memory": gpu_memory,
+        }
+        self._system_history.append(sample)
+        return {"sample": sample, "history": list(self._system_history), "gpu_available": gpu is not None, "gpu_note": gpu_note,
+                "retention": "최근 360개 샘플 (약 1시간 · 10초 갱신)"}
+
+    def _cpu_percent(self) -> float | None:
+        try:
+            fields = (Path("/proc/stat").read_text(encoding="utf-8").splitlines()[0]).split()[1:]
+            values = [int(v) for v in fields]
+            total, idle = sum(values), values[3] + (values[4] if len(values) > 4 else 0)
+        except (OSError, IndexError, ValueError):
+            return None
+        previous, self._previous_cpu = self._previous_cpu, (total, idle)
+        if previous is None or total <= previous[0]:
+            return None
+        return round(max(0.0, min(100.0, 100 * (1 - (idle - previous[1]) / (total - previous[0])))), 1)
+
+    @staticmethod
+    def _memory_percent() -> float | None:
+        try:
+            values = {}
+            for line in Path("/proc/meminfo").read_text(encoding="utf-8").splitlines():
+                key, value = line.split(":", 1)
+                values[key] = int(value.strip().split()[0])
+            total, available = values["MemTotal"], values["MemAvailable"]
+            return round(max(0.0, min(100.0, 100 * (1 - available / total))), 1)
+        except (OSError, KeyError, ValueError):
+            return None
+
+    @staticmethod
+    def _gpu_metrics() -> tuple[float | None, float | None, str | None]:
+        try:
+            result = subprocess.run(
+                ["nvidia-smi", "--query-gpu=utilization.gpu,memory.used,memory.total", "--format=csv,noheader,nounits"],
+                capture_output=True, text=True, timeout=2, check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return None, None, "NVIDIA GPU 없음 또는 nvidia-smi를 실행할 수 없습니다."
+        if result.returncode or not result.stdout.strip():
+            return None, None, "NVIDIA GPU 없음 또는 nvidia-smi를 실행할 수 없습니다."
+        try:
+            rows = [[float(v.strip()) for v in line.split(",")] for line in result.stdout.splitlines() if line.strip()]
+            gpu = sum(row[0] for row in rows) / len(rows)
+            used, total = sum(row[1] for row in rows), sum(row[2] for row in rows)
+            return round(gpu, 1), round(100 * used / total, 1) if total else None, None
+        except (ValueError, IndexError, ZeroDivisionError):
+            return None, None, "GPU 사용량을 해석할 수 없습니다."
 
     def settings(self) -> Settings:
         return Settings.from_env()
@@ -750,6 +821,24 @@ class Collector:
                 "key_configured": jset.configured, "config_error": cfg_error, "last": last or None,
                 "writable": self.paths.config_writable()}
 
+    def llm_usage(self) -> dict[str, Any]:
+        """Canvas 라우팅 화면용: 설정, 마지막 실제 선택, Jev 및 현재 작업."""
+        settings = self.settings()
+        router = ModelRouter.from_env(settings)
+        fleet = read_json(self.paths.fleet_state)
+        jset = jev.JevSettings.from_env()
+        now = self.now()
+        return {
+            "generated_at": now.strftime("%Y-%m-%dT%H:%M:%S"),
+            "routing": {"mode": router.mode, "gpu_max_percent": router.gpu_max_percent,
+                        "gpu_memory_max_percent": router.gpu_memory_max_percent,
+                        "local": {"provider": router.local.provider, "model": router.local.model, "base_url": router.local.base_url},
+                        "external": {"provider": router.external.provider, "model": router.external.model, "base_url": router.external.base_url}},
+            "last_route": fleet.get("last_llm_route"),
+            "jev": {"provider": jset.provider, "model": jset.model, "configured": jset.configured},
+            "activity": self.daemon(self.config(), now).get("activity"),
+        }
+
     def run_review(self, trigger: str = "manual", dry_run: bool = False) -> dict[str, Any]:
         """동기 실행(요청 API). 이미 돌고 있으면 409 가 되도록 PermissionError 대신 RuntimeError."""
         if not self._review_lock.acquire(blocking=False):
@@ -794,6 +883,32 @@ class Collector:
         if action == "deploy" and not s.profile.deploy.get("command"):
             raise ValueError(f"{repo}: fleet.yaml repos.{repo}.deploy.command 가 없어 배포 요청을 만들 수 없습니다")
         return rq.create_request(self.paths.state_dir, repo, action, ticket, source="web")
+
+    def enhancements(self, repo: str | None = None) -> list[dict[str, Any]]:
+        return eh.list_enhancements(self.paths.state_dir, repo)
+
+    def enhancement(self, enhancement_id: str) -> dict[str, Any]:
+        return eh.get_enhancement(self.paths.state_dir, enhancement_id)
+
+    def create_enhancement(self, repo: str, brief: str, title: str = "") -> dict[str, Any]:
+        self._require_writable()
+        selected = self.find(repo)
+        if selected is None:
+            raise ValueError(f"root 아래에 없는 레포: {repo}")
+        if not selected.target:
+            raise ValueError(f"{repo} 은(는) fleet 대상이 아닙니다. 먼저 레포 목록에서 대상으로 선택하세요")
+        record = eh.create_enhancement(self.paths.state_dir, repo, brief, title)
+        request = rq.create_request(self.paths.state_dir, repo, "enhance", record["id"], source="web")
+        return {"enhancement": record, "request": request}
+
+    def projects(self) -> list[dict[str, Any]]:
+        return pj.list_projects(self.paths.state_dir)
+
+    def create_project(self, name: str, description: str) -> dict[str, Any]:
+        self._require_writable()
+        record = pj.create(self.paths.state_dir, name, description)
+        request = rq.create_request(self.paths.state_dir, record["name"], "bootstrap", record["id"], source="web")
+        return {"project": record, "request": request}
 
     def cancel_request(self, request_id: str) -> bool:
         self._require_writable()

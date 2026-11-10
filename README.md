@@ -71,6 +71,22 @@ review:
 
 작업 크루가 글·코드를 생성하는 LLM과 Jev 판정 모델은 독립적으로 고를 수 있다. 기본은 로컬 Ollama(`HERMES_LLM_PROVIDER=ollama`)이며, LM Studio/vLLM/OpenRouter 같은 OpenAI 호환 생성 LLM은 `HERMES_LLM_PROVIDER=openai`, 해당 `HERMES_BASE_URL`과 `HERMES_API_KEY`를 설정한다. Jev를 OpenRouter로 써도 생성 작업은 계속 로컬 모델로 유지할 수 있다.
 
+### GPU 여유도 기반 내부·외부 생성 LLM 라우팅
+
+Jev는 레포 진행 여부를 판정하는 외부 Decisions API로 유지하고, 실제 PM·디자인·개발·QA·Tech Lead 생성 작업만 실행 직전에 라우팅할 수 있다. `.env`에서 `HERMES_ROUTING=auto`로 켜면 NVIDIA GPU 사용률이 70% 미만이고 VRAM 사용률이 75% 미만일 때 내부 Ollama 모델을 사용한다. 한계를 넘거나 `nvidia-smi`를 읽을 수 없으면 외부 모델을 사용하며, 내부 Ollama 엔드포인트가 응답하지 않아도 외부 모델로 즉시 폴백한다.
+
+```dotenv
+HERMES_ROUTING=auto
+HERMES_LOCAL_MODEL=qwen2.5-coder:7b
+HERMES_EXTERNAL_PROVIDER=openai
+HERMES_EXTERNAL_MODEL=openai/gpt-4.1-mini
+HERMES_EXTERNAL_BASE_URL=https://openrouter.ai/api/v1
+HERMES_ROUTING_GPU_MAX_PERCENT=70
+HERMES_ROUTING_GPU_MEMORY_MAX_PERCENT=75
+```
+
+데몬을 실행하는 **호스트**에서 Ollama를 실행하고 내부 모델을 준비해야 한다: `ollama serve` 및 `ollama pull qwen2.5-coder:7b`. 선택 결과는 `logs/daemon.log`의 `[fleet] LLM route=local|external` 줄에서 확인한다. 라우팅은 새 생성 작업 시작 때만 평가하므로, 이미 실행 중인 티켓의 모델을 중간에 바꾸지 않는다.
+
 ## 사람 승인 모드 (approval)
 
 `fleet.yaml` `approval.default: auto|manual` 와 `approval.repos: {레포: 모드}` 로 레포 성격에 따라 고른다. **auto**(현재 모든 레포의 기본값) 는 Tech Lead 발굴 제안이 바로 `todo` 로 들어가 사람 승인 없이 크루가 진행하고, 남아 있던 `proposed` 티켓도 데몬이 다음 tick 에 자동 승인한다. **manual** 은 `proposed` 로 두고 웹의 ✓ 승인 또는 `hermes-fleet approve` 로 사람이 승인해야 진행한다. 웹 모니터 개요의 '기본 승인 모드' 와 레포 목록의 승인 열(자동/수동 클릭 전환, `*` = 레포 예외)에서 바꾸며 `PUT /api/approval`, `PUT /api/repos/{name}/approval` 로 저장된다. 발굴 상한(`discover.max_open_proposed`)은 auto 에서는 proposed+todo 합계로 센다.
@@ -78,6 +94,10 @@ review:
 ## FE 가이드 준수 측정 (Playwright)
 
 `scripts/monitor.sh qa` 는 docker compose 의 `playwright` 서비스(profile qa, `docker/playwright.Dockerfile`)로 모니터를 실제 Chromium 에서 열어 1920×1080(엄격)·1366×768(참고)에서 탭별 세로/가로 스크롤 없음·바닥 빈 띠 ≤ 80px, 상단 바 56px·사이드바 248/68px·트리거 16px·본문 여백 24/16px, 모달 정중앙(스케줄·확인·티켓)과 Esc 닫힘, 닫힌 모달 잔상 없음, 테마 토글, 브라우저 시간대가 달라도 KST 시계, 10px EDUMGT 푸터, Tailwind·Pretendard 로드, 콘솔 오류 없음을 채점한다. 결과는 `qa/out/report.json`, `qa/out/report.txt` 와 탭별 라이트/다크 스크린샷이며 FAIL 이 하나라도 있으면 종료 코드 1 이다(QA 의 VERDICT: FAIL 근거). `QA_MONITOR_URL` 로 다른 주소를, `QA_STRICT_WIDTHS` 로 엄격 폭을 바꾼다. `scripts/monitor.sh qa-shell` 은 컨테이너 셸이다.
+
+## 레포별 기능 강화 프로젝트
+
+웹 모니터의 **기능 강화** 메뉴에서 대상 레포와 장문의 고객 요구사항을 등록할 수 있다. 원문은 `state/enhancements/`에 보관되고, on-demand 데몬 요청(`enhance`)이 실제 저장소 구조와 함께 분석해 `hermes/backlog/`의 `proposed` 티켓으로 분해한다. 이 단계에서는 코드를 바꾸지 않는다. 이 티켓은 레포의 기본 `approval: auto` 설정과 무관하게 자동 승인 대상에서 제외되므로, 내용을 검토한 뒤 기존 승인·실행 흐름으로 넘겨야 구현·QA가 시작된다. 원문과 모델의 계획 출력은 해당 레포의 `hermes/workspace/enhancements/<프로젝트 ID>/`에 함께 남는다.
 
 설치 위치: `fleet.yaml` 의 `root` 를 비우면 hermes-fleet 의 상위 폴더를 스캔하고(상대 경로는 fleet.yaml 기준), `scripts/monitor.sh` 가 `FLEET_DIR`/`FLEET_ROOT` 를 자동으로 넘기므로 어디에 클론해도 같은 위치의 다른 레포가 대상이 된다.
 

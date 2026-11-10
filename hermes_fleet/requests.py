@@ -7,6 +7,7 @@
 
 요청 action: run(다음 todo 또는 지정 티켓 실행) · discover(발굴) · merge(지금 머지) · approve(proposed→todo) · retry(blocked→todo)
             · stop(진행 중 작업을 단계 경계에서 중단하고 레포 일시정지) · deploy(fleet.yaml deploy.command 실행)
+            · enhance(웹에 등록한 장문 요구사항을 승인 대기 백로그로 분해)
 """
 from __future__ import annotations
 
@@ -17,8 +18,8 @@ import time
 from pathlib import Path
 from typing import Any
 
-VALID_ACTIONS = ("run", "discover", "merge", "approve", "retry", "stop", "deploy")
-TICKET_ACTIONS = ("approve", "retry")          # 티켓 ID 필수
+VALID_ACTIONS = ("run", "discover", "merge", "approve", "retry", "stop", "deploy", "enhance", "bootstrap")
+TICKET_ACTIONS = ("approve", "retry", "enhance", "bootstrap")          # 티켓/프로젝트 ID 필수
 KEEP_DONE = 60
 _NAME = re.compile(r"[^A-Za-z0-9._-]+")
 

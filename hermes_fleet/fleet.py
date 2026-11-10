@@ -21,11 +21,14 @@ from typing import Any, Callable
 from . import requests as rq
 from .backlog import Ticket, find_ticket, load_tickets
 from .discover import run_discover          # 데몬 시작 시점에 미리 적재 (hermes-fleet 자신이 대상일 때 브랜치 전환 중 지연 import 를 피한다)
+from .enhancements import plan_enhancement, update_enhancement
+from .projects import bootstrap as bootstrap_project, update as update_project
 from .llm import check_endpoint
 from .merge import MergeConfig, MergeReport, auto_merge
 from .org import load_org_for
 from .pipeline import Pipeline, PipelineAborted
 from .repos import FleetConfig, RepoProfile, eligible_repos
+from .routing import ModelRouter, RouteDecision
 from .schedule import Schedule, parse_clock
 from .settings import PAUSE_FILE, STATE_DIR, Settings
 from .tools import git
@@ -100,6 +103,8 @@ class FleetDaemon:
         self.cfg = cfg
         self.options = options
         self.settings = settings or Settings.from_env()
+        self.router = ModelRouter.from_env(self.settings)
+        self._work_settings = self.settings
         self.state_dir = state_dir
         self.pause_file = pause_file
         self.log = lambda msg: log(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {msg}")
@@ -125,7 +130,7 @@ class FleetDaemon:
             return self._run_on_demand()
         if self._idle_outside_window():
             return 0  # cron 모드: 시간대 밖이고 할 일(요청)도 없으면 로그 없이 종료 — cron 이 하루 종일 10분마다 깨우므로 조용해야 한다
-        self.log(f"[fleet] start root={self.cfg.root} hours={self.cfg.active_hours} merge_at={self.cfg.merge_at} model={self.settings.litellm_model} @ {self.settings.base_url}")
+        self.log(f"[fleet] start root={self.cfg.root} hours={self.cfg.active_hours} merge_at={self.cfg.merge_at} routing={self.router.mode}")
         while True:
             try:
                 outcome = self.tick()
@@ -162,7 +167,7 @@ class FleetDaemon:
         """웹/CLI 요청만 처리하고 종료. 요청이 없으면 아무 로그도 남기지 않는다(2분마다 돌아도 조용하도록)."""
         if self.pause_file.exists() or rq.next_pending(self.state_dir) is None:
             return 0
-        self.log(f"[fleet] on-demand start root={self.cfg.root} model={self.settings.litellm_model} @ {self.settings.base_url}")
+        self.log(f"[fleet] on-demand start root={self.cfg.root} routing={self.router.mode}")
         while True:
             try:
                 outcome = self.tick()
@@ -214,9 +219,7 @@ class FleetDaemon:
             self.log(f"[fleet] within {self.cfg.no_new_work_minutes_before_end} min of window end; not starting new work")
             return "wait"
 
-        info = check_endpoint(self.settings)
-        if not info["ok"]:
-            self.log(f"[fleet] LLM endpoint unreachable ({info['error']}); retry in {self.cfg.endpoint_retry_seconds}s")
+        if not self._prepare_work_model():
             self.sleep(self.cfg.endpoint_retry_seconds)
             return "wait"
 
@@ -283,6 +286,16 @@ class FleetDaemon:
             status, detail = self._execute_request(repo, action, ticket_id)
         except Exception as exc:  # noqa: BLE001
             status, detail = "failed", str(exc)
+            if action == "enhance" and ticket_id:
+                try:
+                    update_enhancement(self.state_dir, ticket_id, status="failed", error=str(exc))
+                except Exception:  # noqa: BLE001 — 원래 요청 오류를 덮어쓰지 않는다
+                    pass
+            if action == "bootstrap" and ticket_id:
+                try:
+                    update_project(self.state_dir, ticket_id, status="failed", error=str(exc))
+                except Exception:  # noqa: BLE001
+                    pass
             self.log(f"[fleet][{repo}] request {action} error: {exc}\n{traceback.format_exc()}")
         rq.complete(self.state_dir, req, status, detail)
         self.log(f"[fleet][{repo}] ■ request {action}: {status} — {detail[:200]}")
@@ -291,6 +304,18 @@ class FleetDaemon:
         if action == "stop":
             rq.set_repo_paused(self.state_dir, repo, True, "stopped from request")
             return "done", "nothing running; repo paused (resume to continue)"
+        if action == "bootstrap":
+            project = bootstrap_project(self.state_dir, self.cfg.root, self.cfg.source or Path("fleet.yaml"), ticket_id or "")
+            self.cfg.refresh()
+            p = next((x for x in self.repos(self.cfg) if x.name == project["name"]), None)
+            if p is None:
+                raise ValueError("생성한 프로젝트 프로필을 fleet에서 찾지 못했습니다")
+            state = load_state(self.repo_state_path(p.name))
+            ticket = find_ticket(project["ticket"], p.backlog_dir)
+            if not self._prepare_work_model():
+                return "failed", "선택한 LLM 엔드포인트에 연결할 수 없습니다"
+            self._run_ticket(p, ticket, state)
+            return "done", f"{project['name']} 생성·비공개 GitHub 구성·{ticket.id} 실행 완료"
         p = next((x for x in self.repos(self.cfg) if x.name == repo), None)
         if p is None:
             return "failed", "not a fleet target (FE/BE 미확인이거나 선택되지 않음)"
@@ -308,6 +333,14 @@ class FleetDaemon:
             save_state(state, self.repo_state_path(p.name))
             self.log(f"[fleet][{p.name}] ■ deploy: {'ok' if ok else 'failed'}")
             return ("done" if ok else "failed"), detail.splitlines()[0] if detail else ""
+        if action == "enhance":
+            if not self._prepare_work_model():
+                return "failed", "선택한 LLM 엔드포인트에 연결할 수 없습니다"
+            created = plan_enhancement(p, self.state_dir, ticket_id or "", settings=self._work_settings, log=self.log)
+            if created or not git.is_clean(p.root):
+                names = ", ".join("-".join(path.stem.split("-")[:2]) for path in created) or "project artifacts"
+                git.commit_all(f"hermes(enhancement): plan {ticket_id} ({names})\n\nCustomer brief → proposed tickets; approval required before implementation.", p.root)
+            return "done", f"{ticket_id}: {len(created)} proposal(s) created; approve tickets to implement"
         if action == "merge":
             report = self._run_merge(p)
             return "done", f"merged={[o.ticket_id for o in report.merged]} pushed={report.pushed}" + (f" note={report.note}" if report.note else "")
@@ -328,9 +361,8 @@ class FleetDaemon:
                 return "skipped", f"{ticket.id} status={ticket.status} (needs blocked/todo)"
             save_state(state, self.repo_state_path(p.name))
             return "done", f"{ticket.id} reset → todo" + (" (previous run record cleared)" if removed else "")
-        info = check_endpoint(self.settings)
-        if not info["ok"]:
-            return "failed", f"LLM endpoint unreachable ({info['error']})"
+        if not self._prepare_work_model():
+            return "failed", "선택한 LLM 엔드포인트에 연결할 수 없습니다"
         if action == "discover":
             ensure_scaffold(p)
             created = self._run_discover(p)
@@ -379,6 +411,20 @@ class FleetDaemon:
         fleet_state["last_run"] = {"repo": p.name, "at": time.strftime("%Y-%m-%dT%H:%M:%S")}
         save_state(fleet_state, self.fleet_state_path())
 
+    def _prepare_work_model(self) -> bool:
+        """새 생성 작업 직전에 경로를 선택하고 선택된 엔드포인트를 확인한다."""
+        decision: RouteDecision = self.router.choose(check_endpoint)
+        info = check_endpoint(decision.settings) if decision.route != "local" else {"ok": True}
+        if not info.get("ok"):
+            self.log(f"[fleet] {decision.route} LLM endpoint unreachable ({info.get('error', 'unknown error')}); retry in {self.cfg.endpoint_retry_seconds}s")
+            return False
+        self._work_settings = decision.settings
+        fleet_state = load_state(self.fleet_state_path())
+        fleet_state["last_llm_route"] = {**decision.as_dict(), "at": time.strftime("%Y-%m-%dT%H:%M:%S")}
+        save_state(fleet_state, self.fleet_state_path())
+        self.log(f"[fleet] LLM route={decision.route} model={decision.settings.litellm_model} @ {decision.settings.base_url} — {decision.reason}")
+        return True
+
     # ---------- 머지 ----------
     def _merge_due(self, p: RepoProfile, now: dt.datetime) -> bool:
         if self.merge_time is None or now.time() < self.merge_time:
@@ -407,7 +453,7 @@ class FleetDaemon:
         started = time.time()
         entry: dict[str, Any] = {"branch": f"hermes/{ticket.id}", "started_at": time.strftime("%Y-%m-%dT%H:%M:%S")}
         ensure_scaffold(p)
-        pipe = Pipeline(p, ticket, settings=self.settings, org=load_org_for(p), log=self.log, should_abort=lambda: self._abort_requested(p.name))
+        pipe = Pipeline(p, ticket, settings=self._work_settings, org=load_org_for(p), log=self.log, should_abort=lambda: self._abort_requested(p.name))
         try:
             result = pipe.run(create_branch=True, commit=False)
             verdict = "PASS" if result.passed else "FAIL" if result.passed is False else "N/A"
@@ -445,7 +491,11 @@ class FleetDaemon:
         if p.approval != "auto":
             return 0
         try:
-            tickets = [t for t in load_tickets(p.backlog_dir) if t.status == "proposed"]
+            # 장문 요구사항 기반 프로젝트 티켓은 레포의 기본 auto 모드와 무관하게
+            # 사람 검토가 선행되어야 한다. 원문 범위가 큰 작업을 발견 티켓처럼
+            # 즉시 실행하면 의도하지 않은 대규모 변경으로 이어질 수 있다.
+            tickets = [t for t in load_tickets(p.backlog_dir)
+                       if t.status == "proposed" and "## 기능 강화 프로젝트" not in t.body]
         except Exception:  # noqa: BLE001 — 깨진 티켓 파일은 티켓 처리 단계에서 보고된다
             return 0
         if not tickets:
@@ -483,7 +533,7 @@ class FleetDaemon:
         save_state(state, self.repo_state_path(p.name))
         ensure_scaffold(p)
         auto = p.approval == "auto"
-        created = run_discover(p, self.settings, max_proposals=int(self.cfg.discover.get("max_proposals", 2)), log=self.log, status="todo" if auto else "proposed")
+        created = run_discover(p, self._work_settings, max_proposals=int(self.cfg.discover.get("max_proposals", 2)), log=self.log, status="todo" if auto else "proposed")
         if created or not git.is_clean(p.root):
             names = ", ".join("-".join(c.stem.split("-")[:2]) for c in created) or "scaffold"
             note = "status: todo — approval=auto, 사람 승인 없이 진행" if auto else f"status: proposed — 사람 승인 필요 (hermes-fleet approve {p.name} <ID>)"

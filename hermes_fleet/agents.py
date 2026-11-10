@@ -66,7 +66,7 @@ def build_tools(root: Path, settings: Settings, deny: tuple[str, ...] = ()) -> d
 
 def role_llm(role_key: str, org: dict[str, Any], settings: Settings, default_llm: Any):
     override = org["roles"][role_key].get("model")
-    if not override or override == settings.model:
+    if not settings.use_role_overrides or not override or override == settings.model:
         return default_llm
     return build_llm(dataclasses.replace(settings, model=str(override)))
 

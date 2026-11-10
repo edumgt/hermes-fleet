@@ -193,6 +193,11 @@ def test_api(tmp_path: Path, node_python_repo: Path):
     assert client.get("/api/health").json()["ok"] is True
     o = client.get("/api/overview").json()
     assert o["eligible_count"] == 1 and o["daemon"]["status"] == "stopped"
+    system = client.get("/api/system").json()
+    assert {"sample", "history", "gpu_available", "retention"} <= system.keys()
+    assert system["history"] and system["sample"]["memory"] is not None
+    usage = client.get("/api/llm-usage").json()
+    assert {"routing", "jev", "activity", "last_route"} <= usage.keys()
     assert "shop" in {r["name"] for r in client.get("/api/repos").json()} and [r["name"] for r in client.get("/api/repos?all=false").json()] == ["shop"]
     assert client.get("/api/repos/shop").json()["tickets"][0]["id"] == "HX-001"
     assert client.get("/api/repos/shop/tickets/HX-001").json()["status"] == "review"
