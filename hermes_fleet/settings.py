@@ -29,7 +29,10 @@ REPO_ORG_OVERRIDE = "hermes/config/org.yaml"
 
 
 def load_dotenv(path: Path = FLEET_DIR / ".env") -> None:
-    """의존성 없이 KEY=VALUE 형식의 .env를 os.environ에 주입(기존 값 우선, 빈 값은 무시)."""
+    """의존성 없이 KEY=VALUE 형식의 .env를 os.environ에 주입(기존 값 우선, 빈 값은 무시).
+
+    이미 있는 환경변수가 빈 문자열이면 없는 것으로 본다 — docker compose 가 `${TYPESAFE_API_KEY:-}` 처럼 빈 값을 넘겨도 .env 의 값이 살아야 한다.
+    """
     if not path.exists():
         return
     for raw in path.read_text(encoding="utf-8").splitlines():
@@ -38,8 +41,8 @@ def load_dotenv(path: Path = FLEET_DIR / ".env") -> None:
             continue
         key, value = line.split("=", 1)
         key, value = key.strip(), value.strip().strip('"').strip("'")
-        if value:
-            os.environ.setdefault(key, value)
+        if value and not os.environ.get(key):
+            os.environ[key] = value
 
 
 def is_wsl() -> bool:

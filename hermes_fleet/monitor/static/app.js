@@ -319,6 +319,7 @@
       ["discover", esc(`max_proposals=${o.discover.max_proposals} max_open_proposed=${o.discover.max_open_proposed}`)],
       ["FE 가이드", (o.frontend_guide || []).length ? o.frontend_guide.map((g) => `${esc(g.area)}: <strong>${esc(g.use)}</strong>${g.npm ? ` <span class="muted">(${esc(g.npm)})</span>` : ""}`).join("<br>") : "없음"],
       ["모니터", esc(`${o.monitor.in_docker ? "Docker" : "로컬"} · 가동 ${dur(o.monitor.uptime_seconds)}`)],
+      ["Jev 판정", reviewSummary(o.review)],
     ]);
     $("#repo-note").textContent = o.config_writable
       ? "체크 = fleet 작업 대상(fleet.yaml include/exclude 를 편집, 데몬은 다음 tick 에 반영). 행을 클릭하면 작업 내역을 봅니다."
@@ -328,12 +329,55 @@
     renderOverviewCharts(o, state.stats);
   }
 
+  function reviewSummary(rv) {
+    if (!rv) return "-";
+    const parts = [];
+    if (rv.running) parts.push(`<span class="c-warn">실행 중…</span>`);
+    const last = rv.last;
+    if (last) {
+      parts.push(last.ok ? `<span class="c-good">${esc(fmtTs(last.at))}</span> · ${esc(last.model || last.model_requested || "")} · ${last.repos.length}개 판정 · ${last.applied}개 적용 (${esc(last.mode)})`
+                         : `<span class="c-crit">실패</span> ${esc(fmtTs(last.at))} · ${esc(last.error || "")}`);
+    } else {
+      parts.push(`<span class="muted">아직 판정 없음</span>`);
+    }
+    if (!rv.key_configured) parts.push(`<span class="c-serious">TYPESAFE_API_KEY 없음 (.env)</span>`);
+    parts.push(`<span class="muted">기동 시 ${rv.on_start ? "자동" : "꺼짐"} · 모드 ${esc(rv.mode)} · conf ≥ ${rv.min_confidence}</span>`);
+    return parts.join("<br>");
+  }
+
+  function reviewCell(d) {
+    const r = d.review;
+    if (!r || !r.jev) return `<span class="muted" title="아직 Jev 판정 없음">-</span>`;
+    const j = r.jev;
+    const cls = r.decision === "include" ? "good" : r.decision === "exclude" ? "crit" : j.choice === "proceed" ? "good" : "warn";
+    const label = r.decision === "include" ? "포함" : r.decision === "exclude" ? "제외" : j.choice === "proceed" ? "진행" : "보류";
+    const tip = `Jev ${j.choice} · proceed ${j.proceed_probability} · confidence ${j.confidence} · 활성도 ${j.activity_score} ${j.activity || ""}\n${r.reason}${r.applied ? "\n(fleet.yaml 에 적용됨)" : ""}\n판정 ${fmtTs(r.at)}`;
+    return `<span title="${esc(tip)}">${badge(`${label} ${Math.round(j.proceed_probability * 100)}%`, cls)}${r.applied ? " ✓" : ""}</span>`;
+  }
+
+  async function runReview(dryRun) {
+    const btn = $("#btn-review");
+    if (btn) { btn.disabled = true; btn.textContent = "Jev 판정 중…"; }
+    try {
+      const res = await api("/api/review", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ dry_run: !!dryRun, trigger: "web" }) });
+      if (res.ok) toast(`Jev 판정 ${res.repos.length}개 · ${res.applied}개 적용 (${res.mode}, ${res.model || res.model_requested})`, true);
+      else toast(`Jev 판정 실패: ${res.error}`);
+      refresh();
+    } catch (e) {
+      toast(`Jev 판정 실패: ${e.message}`);
+    } finally {
+      if (btn) { btn.disabled = false; btn.textContent = "Jev 판정"; }
+    }
+  }
+
   function renderRepoGrid(repos) {
     const cols = [
       { headerName: "대상", field: "selected", width: 72, cellRenderer: SwitchRenderer, sortable: true, cellClass: "cell-center" },
       { headerName: "레포", field: "name", minWidth: 150, flex: 1.2, cellRenderer: htmlCell((d) => `<strong>${esc(d.name)}</strong>${d.has_remote ? "" : ` <span class="muted" title="원격 없음">⌂</span>`}${d.paused ? ` ${badge("일시정지", "serious")}` : ""}${(d.pending_requests || []).length ? ` <span class="muted" title="${esc(d.pending_requests.join(", "))}">⏳${d.pending_requests.length}</span>` : ""}`) },
       { headerName: "제어", field: "actions", width: 300, sortable: false, cellRenderer: ActionsRenderer, cellClass: "cell-center" },
       { headerName: "승인", field: "approval", width: 96, cellRenderer: htmlCell((d) => d.fe_be_ok ? `<button class="appr ${d.approval}" data-approval="${esc(d.name)}" data-mode="${esc(d.approval)}" title="${d.approval === "auto" ? "자동: 제안이 바로 todo 로 들어가 사람 승인 없이 진행" : "수동: proposed 로 두고 사람이 승인"}${d.approval_override ? " (레포 예외)" : " (기본값)"} · 클릭하면 전환" ${state.overview && state.overview.config_writable ? "" : "disabled"}>${d.approval === "auto" ? "자동" : "수동"}${d.approval_override ? "*" : ""}</button>` : "-"), headerTooltip: "사람 승인 모드 (fleet.yaml approval)" },
+      { headerName: "Jev", field: "review", width: 110, cellRenderer: htmlCell(reviewCell), headerTooltip: "Jev(TypeSafe 판단 모델) 판정: 프로젝트로 진행할지 · proceed 확률. ✓ = fleet.yaml 에 적용됨",
+        comparator: (a, b) => ((a && a.jev ? a.jev.proceed_probability : -1) - (b && b.jev ? b.jev.proceed_probability : -1)) },
       { headerName: "FE", field: "frontend", minWidth: 120, flex: 1, valueFormatter: (p) => p.value || "-" },
       { headerName: "BE", field: "backend", minWidth: 140, flex: 1, valueFormatter: (p) => p.value || "-" },
       { headerName: "브랜치", field: "current_branch", minWidth: 100, cellRenderer: htmlCell((d) => d.current_branch ? `${esc(d.current_branch)}${d.on_base ? "" : ` <span class="c-warn" title="기준 브랜치 아님">≠${esc(d.base_branch)}</span>`}` : `<span class="muted">${esc(d.base_branch || "-")}</span>`) },
@@ -356,6 +400,11 @@
     if (grid) setRows("repos", repos);
     $("#repo-count").textContent = `(${repos.length})`;
   }
+
+  const reviewBtn = document.getElementById("btn-review");
+  if (reviewBtn) reviewBtn.addEventListener("click", () => runReview(false));
+  const reviewDry = document.getElementById("btn-review-dry");
+  if (reviewDry) reviewDry.addEventListener("click", () => runReview(true));
 
   document.addEventListener("click", async (ev) => {
     const b = ev.target.closest("button[data-approval]");

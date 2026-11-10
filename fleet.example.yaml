@@ -44,3 +44,14 @@ auto_merge:
   verify_timeout: 900
   push: true
   delete_merged_branches: true
+
+# Jev 레포 판정(hermes_fleet/review.py): Docker 모니터가 (재)기동될 때 root 아래 저장소마다 FE/BE 탐지·최근 커밋·지난 판정 이후 변화·티켓 수를
+# TypeSafe AI 의 판단 전용 모델 Jev 에 넘겨 '프로젝트로 진행할지'(proceed|skip + 확률·confidence) 를 받아 include/exclude 를 고친다.
+# 키는 .env TYPESAFE_API_KEY. 수동 실행: hermes-fleet review [--dry-run] / 웹 레포 목록 'Jev 판정' 버튼 / POST /api/review
+review:
+  on_start: true          # 모니터(컨테이너) 기동 때 실행 (HERMES_REVIEW=skip 으로도 끔)
+  mode: apply             # apply = fleet.yaml include/exclude 를 고친다 / advise = 판정만 state/review.json 에 기록
+  model: jev-latest       # 비우면 .env JEV_MODEL → jev-latest
+  min_confidence: 0.6     # Jev confidence 가 이 값보다 낮으면 현 상태 유지
+  pinned: []              # Jev 가 바꾸지 못하는 레포 (hermes-fleet 자신은 항상 고정)
+  max_commits: 15         # 판정 근거로 넘길 최근 커밋 수

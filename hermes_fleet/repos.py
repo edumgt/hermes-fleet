@@ -288,6 +288,7 @@ class FleetConfig:
     discover: dict[str, Any] = field(default_factory=lambda: {"max_proposals": 2, "max_open_proposed": 4})
     auto_merge: dict[str, Any] = field(default_factory=lambda: {"verify": True, "require_verification": True, "verify_timeout": 900, "push": True, "delete_merged_branches": True})
     approval: dict[str, Any] = field(default_factory=lambda: {"default": "auto", "repos": {}})   # 사람 승인 모드 (기본 + 레포별 예외)
+    review: dict[str, Any] = field(default_factory=lambda: {"on_start": True, "mode": "apply", "model": "", "min_confidence": 0.6, "pinned": [], "max_commits": 15})   # Jev 레포 판정(review.py)
     source: Path | None = None          # 읽어 온 fleet.yaml 경로 (핫리로드용)
     source_mtime: float | None = None
 
@@ -313,9 +314,13 @@ class FleetConfig:
         if isinstance(ap, str):
             ap = {"default": ap}
         cfg.approval = {"default": _approval_mode(ap.get("default"), "auto"), "repos": {str(k): _approval_mode(v, "auto") for k, v in (ap.get("repos") or {}).items()}}
+        rv = data.get("review")
+        if isinstance(rv, bool):
+            rv = {"on_start": rv}
+        cfg.review = {**cfg.review, **(rv or {})}
         return cfg
 
-    RELOADABLE = ("include", "exclude", "repos", "active_hours", "calendar", "merge_at", "no_new_work_minutes_before_end", "poll_seconds", "endpoint_retry_seconds", "discover", "auto_merge", "approval")
+    RELOADABLE = ("include", "exclude", "repos", "active_hours", "calendar", "merge_at", "no_new_work_minutes_before_end", "poll_seconds", "endpoint_retry_seconds", "discover", "auto_merge", "approval", "review")
 
     def approval_for(self, name: str) -> str:
         """레포의 사람 승인 모드: repos 예외 → default."""

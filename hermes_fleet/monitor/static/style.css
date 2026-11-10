@@ -576,3 +576,6 @@ dialog.modal { max-height: min(90vh, 100% - 32px - var(--footer-h)); }
 
 .init-banner { margin-bottom: var(--gap); padding: 10px 14px; border-radius: 10px; border: 1px solid color-mix(in srgb, var(--warning) 55%, var(--border)); background: color-mix(in srgb, var(--warning) 12%, var(--surface)); color: var(--text); font-size: 13px; }
 .init-banner code { font-family: var(--mono); font-size: 12px; background: var(--surface-2); padding: 1px 6px; border-radius: 4px; }
+
+/* 레포 목록 카드 머리의 Jev 판정 버튼 */
+.head-actions { margin-left: auto; display: inline-flex; gap: 8px; align-items: center; }

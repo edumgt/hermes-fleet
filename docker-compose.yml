@@ -9,6 +9,7 @@
 # 주의: ${PWD} 는 compose 를 실행한 셸의 현재 폴더다. 다른 폴더에서 `docker compose -f .../docker-compose.yml up` 하면 경로가 어긋나므로
 #       그때는 FLEET_DIR=/path/to/hermes-fleet 을 함께 넘기거나 scripts/monitor.sh up 을 쓴다 (엔트리포인트가 하위 폴더에서 hermes-fleet 을 찾아 보정은 한다).
 # fleet.yaml 이 없으면(받은 직후) 모니터 컨테이너가 상위 폴더를 읽어 자동 init(fleet.yaml/.env 생성) 한다. 이미 있으면 그대로 쓴다.
+# 기동할 때마다 Jev 가 다른 레포의 변경을 보고 프로젝트로 진행할지 판정해 include/exclude 를 갱신한다(review 블록, HERMES_REVIEW=skip 으로 끔).
 services:
   monitor:
     build:
@@ -33,6 +34,13 @@ services:
       HERMES_BASE_URL: "${MONITOR_HERMES_BASE_URL:-}"
       # GitHub Actions 실행 상태 조회용(비공개 레포면 필요). repo 읽기 권한의 fine-grained 토큰이면 충분.
       MONITOR_GITHUB_TOKEN: "${MONITOR_GITHUB_TOKEN:-}"
+      # Jev(TypeSafe AI 판단 전용 모델) — 컨테이너 (재)기동 때 레포별 '프로젝트로 진행할지' 판정 → fleet.yaml include/exclude 갱신.
+      # 키는 보통 hermes-fleet/.env 의 TYPESAFE_API_KEY 에 둔다(마운트돼 컨테이너가 읽음). 여기 값이 비면 .env 가 쓰인다.
+      # HERMES_REVIEW=skip 으로 끔(fleet.yaml review.on_start 로도 끔). OpenRouter 경유: TYPESAFE_BASE_URL=https://openrouter.ai/api JEV_MODEL=typesafe/jev-1.14
+      HERMES_REVIEW: "${HERMES_REVIEW:-auto}"
+      TYPESAFE_API_KEY: "${TYPESAFE_API_KEY:-}"
+      TYPESAFE_BASE_URL: "${TYPESAFE_BASE_URL:-}"
+      JEV_MODEL: "${JEV_MODEL:-}"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     read_only: true

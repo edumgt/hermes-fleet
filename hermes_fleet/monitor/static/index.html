@@ -137,6 +137,10 @@
       <div class="card-head">
         <h2>레포 목록 <span class="muted" id="repo-count"></span></h2>
         <span class="muted" id="repo-note">체크 = fleet 작업 대상(fleet.yaml include/exclude). 행을 클릭하면 작업 내역을 봅니다.</span>
+        <span class="head-actions">
+          <button type="button" class="btn sm" id="btn-review-dry" title="Jev 로 판정만 해 보고 fleet.yaml 은 고치지 않음">Jev 미리보기</button>
+          <button type="button" class="btn sm primary" id="btn-review" title="Jev(TypeSafe 판단 모델)로 레포별 '프로젝트로 진행할지' 판정 → include/exclude 갱신 (컨테이너 재기동 때도 자동)">Jev 판정</button>
+        </span>
       </div>
       <div id="grid-repos" class="grid-box repos"></div>
     </div>

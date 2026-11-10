@@ -1,4 +1,4 @@
-"""hermes-fleet CLI: init(환경 초기화) / repos / check / status / backlog / new / approve / run / discover / merge / daemon / pause / resume / scaffold"""
+"""hermes-fleet CLI: init(환경 초기화) / repos / review(Jev 판정) / check / status / backlog / new / approve / run / discover / merge / daemon / pause / resume / scaffold"""
 from __future__ import annotations
 
 import argparse
@@ -44,6 +44,24 @@ def cmd_repos(args: argparse.Namespace) -> int:
             for cwd, cmd in p.verify_steps():
                 print(f"{'':<20} verify: ({cwd}) {' '.join(cmd)}")
             print(f"{'':<20} org: {load_org_for(p)['_source']}")
+    return 0
+
+
+def cmd_review(args: argparse.Namespace) -> int:
+    """Jev 로 레포별 '프로젝트로 진행할지' 판정 → fleet.yaml include/exclude 갱신 (Docker 모니터 재기동 때 자동으로 도는 것과 같은 동작)."""
+    from .review import run_review  # noqa: WPS433
+
+    cfg = _cfg(args)
+    fleet_dir = (cfg.source or fleet_config_path()).resolve().parent
+    res = run_review(fleet_dir, cfg, trigger="cli", dry_run=args.dry_run, log=print)
+    if not res["ok"]:
+        print(f"✗ {res['error']}", file=sys.stderr)
+        return 1
+    for r in res["repos"]:
+        mark = {"include": "＋", "exclude": "－", "keep": "＝"}[r["decision"]]
+        j = r["jev"]
+        print(f"  {mark} {r['name']:<28} {r['decision']:<7}{' 적용' if r['applied'] else '    '}  proceed {j['proceed_probability']:.2f} conf {j['confidence']:.2f} 활성 {j['activity_score']:.1f}  {r['reason']}")
+    print(f"✓ {len(res['repos'])}개 판정, {res['applied']}개 적용 ({res['mode']}, {res['model']}) → state/review.json")
     return 0
 
 
@@ -316,6 +334,9 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("-v", "--verbose", action="store_true", help="검증 명령과 org 출처 표시")
     r.set_defaults(func=cmd_repos)
     sub.add_parser("check", help="LLM 엔드포인트/모델/설정/백로그 점검").set_defaults(func=cmd_check)
+    rv = sub.add_parser("review", help="Jev(TypeSafe 판단 모델)로 레포별 '프로젝트로 진행할지' 판정 → include/exclude 갱신 (Docker 재기동 때 자동)")
+    rv.add_argument("--dry-run", action="store_true", help="판정만 보고 fleet.yaml 은 고치지 않음")
+    rv.set_defaults(func=cmd_review)
     sub.add_parser("status", help="레포별 승인 대기/리뷰 대기/막힘/대기 요약").set_defaults(func=cmd_status)
 
     b = sub.add_parser("backlog", help="티켓 목록")

@@ -1,6 +1,7 @@
 #!/bin/sh
 # 모니터 컨테이너 엔트리포인트: 기존 하네스 설정(fleet.yaml)이 있으면 그대로 쓰고, 없으면(받은 직후) 자동 init 뒤 모니터를 띄운다.
 #   HERMES_INIT=auto|skip      (기본 auto) fleet.yaml 이 없을 때 init 실행 여부
+#   HERMES_REVIEW=auto|skip    (기본 auto) 기동 때 Jev 레포 판정 실행 여부 (키: TYPESAFE_API_KEY, 보통 .env)
 #   HERMES_INIT_ARGS="..."     init 에 넘길 추가 인자 (예: --provider openai --base-url http://host.docker.internal:1234/v1 --model qwen2.5-coder:7b --include a,b)
 set -eu
 FLEET_DIR="${HERMES_FLEET_DIR:?HERMES_FLEET_DIR 가 필요합니다}"
@@ -32,5 +33,16 @@ else
   else
     echo "[entrypoint] 초기화 실패 — 읽기 전용으로 띄웁니다. 터미널에서 scripts/init.sh 로 다시 시도하세요." >&2
   fi
+fi
+# 레포 판정(Jev): fleet.yaml 이 있으면 모니터 앱이 기동 직후 백그라운드로 한 번 돌린다(hermes_fleet.review). 여기서는 상태만 알린다.
+if [ -f "$FLEET_DIR/fleet.yaml" ]; then
+  case "${HERMES_REVIEW:-auto}" in
+    skip|off|0|false|no) echo "[entrypoint] Jev 레포 판정: 꺼짐(HERMES_REVIEW=${HERMES_REVIEW})" ;;
+    *) if [ -n "${TYPESAFE_API_KEY:-}" ] || grep -Eq '^TYPESAFE_API_KEY=.+' "$FLEET_DIR/.env" 2>/dev/null; then
+         echo "[entrypoint] Jev 레포 판정: 기동 후 백그라운드 실행 → 결과 state/review.json, 웹 레포 목록 'Jev' 열 (fleet.yaml review 블록으로 조정)"
+       else
+         echo "[entrypoint] Jev 레포 판정: TYPESAFE_API_KEY 가 없어 건너뜀 — $FLEET_DIR/.env 에 넣으세요 (https://console.typesafe.ai/keys)" >&2
+       fi ;;
+  esac
 fi
 exec "$@"

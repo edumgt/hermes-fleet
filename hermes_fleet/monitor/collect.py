@@ -21,6 +21,8 @@ from ..backlog import VALID_STATUS, Ticket, TicketError, load_tickets
 from .. import requests as rq
 from ..fleetfile import SCHEDULE_KEYS, FleetFileError, is_selected, set_repo_selected, update_approval, update_calendar, update_schedule
 from ..llm import check_endpoint
+from .. import jev, review as rv
+import threading
 from ..merge import list_ticket_branches, ticket_on_branch
 from ..org import load_org_for, load_template
 from ..repos import FleetConfig, RepoProfile, detect_profile
@@ -252,6 +254,9 @@ class Collector:
         self._llm_cache: tuple[float, dict[str, Any]] | None = None
         self._delivery_cache: dict[str, tuple[float, dict[str, Any]]] = {}
         self.started_at = time.time()
+        self._review_lock = threading.Lock()
+        self._review_thread: threading.Thread | None = None
+        self._review_cache: tuple[float, dict[str, Any]] | None = None
 
     @classmethod
     def from_env(cls) -> "Collector":
@@ -520,7 +525,8 @@ class Collector:
                                 "paused": rq.is_repo_paused(self.paths.state_dir, p.name), "pending_requests": pending, "deny": list(p.deny),
                                 "frontend": p.frontend.label() if p.frontend else None, "backend": p.backend.label() if p.backend else None,
                                 "base_branch": p.base_branch, "has_remote": p.has_remote,
-                                "approval": p.approval, "approval_override": p.name in (self.config().approval.get("repos") or {})}
+                                "approval": p.approval, "approval_override": p.name in (self.config().approval.get("repos") or {}),
+                                "review": self._review_rows().get(p.name)}
         if not p.eligible:
             return base
         state = self._repo_state(p.name)
@@ -720,6 +726,56 @@ class Collector:
         return {"rows": rows, "totals": totals, "with_ci": with_ci, "github_token": bool(self._github_token()), "generated_at": now.strftime("%Y-%m-%dT%H:%M:%S")}
 
     # ----- 제어 (요청 큐 / 일시정지 / 스케줄) -----
+    # ----- Jev 레포 판정(review) -----
+    def _review_rows(self) -> dict[str, dict[str, Any]]:
+        last = rv.load_last(self.paths.fleet_dir)
+        return {r["name"]: {**r, "at": last.get("at")} for r in last.get("repos", []) if isinstance(r, dict) and r.get("name")}
+
+    def review_running(self) -> bool:
+        t = self._review_thread
+        return bool(t and t.is_alive())
+
+    def review_status(self) -> dict[str, Any]:
+        """마지막 판정(state/review.json) + 설정 + 실행 중 여부 + Jev 키 설정 여부."""
+        cfg = self.config()
+        try:
+            settings = rv.ReviewSettings.from_config(cfg.review)
+            cfg_error = None
+        except ValueError as exc:
+            settings, cfg_error = rv.ReviewSettings(), str(exc)
+        jset = jev.JevSettings.from_env(settings.model)
+        last = rv.load_last(self.paths.fleet_dir)
+        return {"running": self.review_running(), "on_start": settings.on_start and rv.on_start_enabled(cfg), "mode": settings.mode,
+                "min_confidence": settings.min_confidence, "pinned": settings.pinned, "model": jset.model, "base_url": jset.base_url,
+                "key_configured": jset.configured, "config_error": cfg_error, "last": last or None,
+                "writable": self.paths.config_writable()}
+
+    def run_review(self, trigger: str = "manual", dry_run: bool = False) -> dict[str, Any]:
+        """동기 실행(요청 API). 이미 돌고 있으면 409 가 되도록 PermissionError 대신 RuntimeError."""
+        if not self._review_lock.acquire(blocking=False):
+            raise RuntimeError("Jev 판정이 이미 실행 중입니다")
+        try:
+            if not self.initialized():
+                raise ValueError("fleet.yaml 이 없어 판정할 수 없습니다 (먼저 init)")
+            return rv.run_review(self.paths.fleet_dir, self.config(), trigger=trigger, dry_run=dry_run, log=lambda m: print(m, flush=True))
+        finally:
+            self._review_lock.release()
+
+    def start_review_async(self, trigger: str = "start") -> bool:
+        """모니터 기동 때 백그라운드 스레드로 판정(헬스체크·첫 화면을 막지 않는다). 이미 실행 중이면 False."""
+        if self.review_running():
+            return False
+        t = threading.Thread(target=self._safe_review, args=(trigger,), name="jev-review", daemon=True)
+        self._review_thread = t
+        t.start()
+        return True
+
+    def _safe_review(self, trigger: str) -> None:
+        try:
+            self.run_review(trigger)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[review] 실패: {exc}", flush=True)
+
     def _require_writable(self) -> None:
         if not os.access(self.paths.fleet_dir, os.W_OK):
             raise PermissionError(f"hermes-fleet 디렉터리에 쓸 수 없습니다 (읽기 전용 마운트?): {self.paths.fleet_dir}")
@@ -990,4 +1046,5 @@ class Collector:
                         "pending": rq.list_pending(self.paths.state_dir), "recent": rq.list_done(self.paths.state_dir, 12)},
             "auto_merge": cfg.auto_merge, "discover": cfg.discover, "approval": cfg.approval, "frontend_guide": self._frontend_guide_summary(),
             "monitor": {"uptime_seconds": round(time.time() - self.started_at), "in_docker": Path("/.dockerenv").exists()},
+            "review": self.review_status(),
         }

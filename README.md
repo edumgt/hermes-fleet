@@ -43,6 +43,32 @@ hermes-fleet/
 
 둘 다 있어야 대상이며, git 저장소가 아니거나 `exclude` 에 있으면 제외됩니다. 자동 탐지가 틀리면 `fleet.yaml` 의 `repos.<name>.frontend/backend` 로 지정합니다.
 
+## 레포 판정 — Jev 로 "프로젝트로 진행할지" (review)
+
+위의 FE/BE 탐지는 규칙이고, **어떤 레포를 자율 크루의 프로젝트로 삼을지**는 [Jev](https://docs.typesafe.ai)(TypeSafe AI 의 판단 전용 "System One" 모델)가 판정한다. Jev 는 줄글을 생성하지 않고 state + 타입 있는 질문을 받아 선택지·확률·confidence 만 돌려주므로(파싱 실패·환각 없이 분기에 바로 쓸 수 있다) 다음 세 질문을 레포마다 한 번에 묻는다.
+
+| 질문 | 타입 | 답 |
+|---|---|---|
+| 자율 크루가 이 레포를 프로젝트로 다룰까 | choice `proceed` / `skip` | 선택지 + 옵션별 확률 + confidence |
+| 커밋 이력으로 본 개발 활성도 | score 0~3 (archived → active) | 확률 가중 점수 |
+| 지난 판정 이후 판단에 영향을 주는 변화가 있었나 | noul | 참일 확률 |
+
+state 로는 FE/BE 탐지 결과·원격 유무·마지막 커밋 경과일·최근 30일 커밋 수·**지난 판정(state/review.json 의 HEAD) 이후의 커밋과 바뀐 디렉터리**·티켓 수를 JSON 으로 넘긴다(산술·날짜 비교는 코드가 한다). 판정은 모델이, 정책은 코드가 맡는다: hermes-fleet 자신과 `review.pinned` 는 고정, FE·BE 가 탐지되지 않은 레포는 proceed 라도 대상이 될 수 없음(오버라이드 안내만), `confidence < min_confidence` 면 현 상태 유지, 진행 중/리뷰 대기 티켓이 있는 레포는 제외하지 않음. 결과는 `mode: apply` 면 fleet.yaml 의 include/exclude 에 바로 반영(exclude 추가 또는 되살림)되고 `advise` 면 기록만 한다.
+
+**언제 도나**: Docker 모니터 컨테이너가 (재)기동될 때마다 — `docker compose up -d` / `scripts/monitor.sh restart` — 모니터 앱이 기동 직후 백그라운드 스레드로 한 번 돌린다(헬스체크·첫 화면을 막지 않음). 그 외 웹 레포 목록의 **Jev 판정 / Jev 미리보기** 버튼, `hermes-fleet review [--dry-run]`, `POST /api/review {dry_run}` 으로 수동 실행. 마지막 판정은 `GET /api/review`, 레포 목록의 Jev 열(포함/제외/진행/보류 + proceed %, ✓ = 적용됨), 개요의 'Jev 판정' 행, `logs/review.log` 에서 본다.
+
+```yaml
+# fleet.yaml
+review:
+  on_start: true          # 컨테이너 기동 때 실행 (HERMES_REVIEW=skip 으로도 끔)
+  mode: apply             # apply | advise
+  model: jev-latest       # 비우면 .env JEV_MODEL
+  min_confidence: 0.6
+  pinned: []
+  max_commits: 15
+```
+키는 `.env` 의 `TYPESAFE_API_KEY`(발급 https://console.typesafe.ai/keys, 입력 토큰당 과금·출력 무료). OpenRouter 를 쓰면 `TYPESAFE_BASE_URL=https://openrouter.ai/api`, `JEV_MODEL=typesafe/jev-1.14`. 키가 없으면 판정을 건너뛰고 모니터에 안내만 뜬다 — 선택/해제는 그대로 수동(체크박스)으로 할 수 있다.
+
 ## 사람 승인 모드 (approval)
 
 `fleet.yaml` `approval.default: auto|manual` 와 `approval.repos: {레포: 모드}` 로 레포 성격에 따라 고른다. **auto**(현재 모든 레포의 기본값) 는 Tech Lead 발굴 제안이 바로 `todo` 로 들어가 사람 승인 없이 크루가 진행하고, 남아 있던 `proposed` 티켓도 데몬이 다음 tick 에 자동 승인한다. **manual** 은 `proposed` 로 두고 웹의 ✓ 승인 또는 `hermes-fleet approve` 로 사람이 승인해야 진행한다. 웹 모니터 개요의 '기본 승인 모드' 와 레포 목록의 승인 열(자동/수동 클릭 전환, `*` = 레포 예외)에서 바꾸며 `PUT /api/approval`, `PUT /api/repos/{name}/approval` 로 저장된다. 발굴 상한(`discover.max_open_proposed`)은 auto 에서는 proposed+todo 합계로 센다.
@@ -87,7 +113,7 @@ git push <public-remote> public:main     # 통과하면 그 브랜치만 공개 
 
 ```bash
 git clone <this-repo> hermes-fleet && cd hermes-fleet      # 작업 대상 레포들이 있는 폴더 안에 클론한다 (형제 폴더가 후보가 된다)
-docker compose up -d               # (Docker 경로) fleet.yaml 없으면 자동 init → 웹 모니터. 있으면 기존 설정 유지
+docker compose up -d               # (Docker 경로) fleet.yaml 없으면 자동 init → 웹 모니터. 있으면 기존 설정 유지 + Jev 가 레포별 진행 여부 재판정(review)
 scripts/init.sh                    # ① 상위 폴더의 git 저장소를 스캔해 FE/BE 탐지 → 대상 선택(대화형; --yes 면 전부)
                                    # ② fleet.example.yaml → fleet.yaml, .env.example → .env  ③ LLM 엔드포인트·모델 점검  ④ 다음 단계 안내
 scripts/init.sh --yes --root /path/to/repos --provider openai --base-url http://localhost:1234/v1 --model qwen2.5-coder:7b   # 비대화 예

@@ -1,8 +1,13 @@
-"""FastAPI 앱: /api/* JSON + 정적 SPA(/). 쓰기는 레포 선택/해제(PUT /api/repos/{name}/selection → fleet.yaml) 하나뿐이다."""
+"""FastAPI 앱: /api/* JSON + 정적 SPA(/). 쓰기는 fleet.yaml 편집(레포 선택/승인/스케줄/달력)과 요청 큐, 그리고 Jev 레포 판정(POST /api/review) 이다.
+
+기동(startup) 때 fleet.yaml 이 있고 review.on_start(기본 true, HERMES_REVIEW=skip 으로 끔)면 Jev 판정을 백그라운드 스레드로 한 번 돌린다 —
+Docker 컨테이너가 (재)기동될 때마다 다른 레포의 변경을 보고 프로젝트로 진행할지 다시 판단하는 지점이다.
+"""
 from __future__ import annotations
 
 import asyncio
 import json
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
@@ -12,6 +17,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from ..fleetfile import FleetFileError
+from .. import review as rv
 from .collect import Collector, parse_log_line, tail_lines
 
 
@@ -36,6 +42,11 @@ class CalendarBody(BaseModel):
     entries: dict[str, str | None]
 
 
+class ReviewBody(BaseModel):
+    dry_run: bool = False
+    trigger: str = "manual"
+
+
 class ScheduleBody(BaseModel):
     active_hours: str | None = None
     merge_at: str | None = None
@@ -48,7 +59,18 @@ STATIC_DIR = Path(__file__).resolve().parent / "static"
 
 def create_app(collector: Collector | None = None) -> FastAPI:
     col = collector or Collector.from_env()
-    app = FastAPI(title="Hermes Fleet Monitor", version="0.1.0", docs_url="/api/docs", openapi_url="/api/openapi.json")
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI):
+        # 기동 직후: Docker 컨테이너가 (재)기동될 때 다른 레포의 변경을 보고 프로젝트로 진행할지 Jev 로 다시 판정한다(백그라운드 스레드).
+        try:
+            if col.initialized() and rv.on_start_enabled(col.config()):
+                print("[review] 기동 시 Jev 레포 판정을 백그라운드로 시작합니다 (HERMES_REVIEW=skip 또는 fleet.yaml review.on_start: false 로 끔)", flush=True)
+                col.start_review_async("start")
+        except Exception as exc:  # noqa: BLE001 — 모니터 기동을 막지 않는다
+            print(f"[review] 기동 시 판정 시작 실패: {exc}", flush=True)
+        yield
+
+    app = FastAPI(title="Hermes Fleet Monitor", version="0.1.0", docs_url="/api/docs", openapi_url="/api/openapi.json", lifespan=lifespan)
     app.state.collector = col
 
     @app.get("/api/health")
@@ -153,6 +175,22 @@ def create_app(collector: Collector | None = None) -> FastAPI:
         except PermissionError as exc:
             raise HTTPException(409, str(exc)) from exc
         except (FleetFileError, ValueError) as exc:
+            raise HTTPException(400, str(exc)) from exc
+
+    @app.get("/api/review")
+    def review_status() -> dict[str, Any]:
+        """마지막 Jev 레포 판정(state/review.json)과 설정·실행 중 여부."""
+        return col.review_status()
+
+    @app.post("/api/review")
+    def review_run(body: ReviewBody | None = None) -> dict[str, Any]:
+        """지금 Jev 판정을 돌린다(동기, 레포당 한 번 호출). dry_run=true 면 fleet.yaml 을 고치지 않는다."""
+        body = body or ReviewBody()
+        try:
+            return col.run_review(trigger=body.trigger or "manual", dry_run=body.dry_run)
+        except RuntimeError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
 
     @app.get("/api/workflow")
